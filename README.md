@@ -66,8 +66,12 @@ What exists:
 
 - `Router` — top-4 selection with softmax over the selection only
 - `RoutingTrace` — measures real router skew and replays it through the planner
+- `RoPE` — YaRN-corrected frequencies, matching transformers to 1e-5
+- `Attention` — grouped-query attention with sinks and sliding windows, verified
+  against NumPy at 1, 8, 32 and 200 tokens
 
-Not started: attention, KV cache, tokenizer, sampling.
+Not started: KV cache reuse across steps, the residual loop over 36 layers,
+tokenizer, sampling.
 
 ### Installing
 

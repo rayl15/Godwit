@@ -33,7 +33,11 @@ public struct GodwitManifest: Codable, Sendable {
     }
 
     /// Bumped whenever the on-disk layout changes incompatibly.
-    public static let currentFormatVersion = 1
+    ///
+    /// v2 adds the attention biases, which v1 omitted entirely. A v1 install is
+    /// not merely older, it is missing tensors the model needs, so it is
+    /// rejected rather than upgraded.
+    public static let currentFormatVersion = 2
 
     public let formatVersion: Int
     public let model: String

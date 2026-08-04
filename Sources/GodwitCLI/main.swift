@@ -187,6 +187,83 @@ func runRoutingTrace(model: String, layer: Int, tokens: Int) {
     }
 }
 
+func runAttentionCheck(model: String, reference: String) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let spec = reader.manifest.spec
+        let rope = RoPE(configuration: .gptOSS)
+        let attention = Attention(context: context, spec: spec, rope: rope)
+
+        let refDir = URL(fileURLWithPath: reference)
+        let info = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: refDir.appendingPathComponent("case.json"))) as! [String: Any]
+        let layer = info["layer"] as! Int
+        let tokens = info["tokens"] as! Int
+        let hiddenSize = info["hiddenSize"] as! Int
+
+        func load<T>(_ name: String, _ type: T.Type, _ count: Int) throws -> [T] {
+            let data = try Data(contentsOf: refDir.appendingPathComponent(name))
+            return data.withUnsafeBytes {
+                Array(UnsafeBufferPointer(start: $0.bindMemory(to: T.self).baseAddress!,
+                                          count: count))
+            }
+        }
+        let hidden: [Float16] = try load("hidden.f16", Float16.self, tokens * hiddenSize)
+        let expected: [Float] = try load("y.f32", Float.self, tokens * hiddenSize)
+
+        let weights = try Attention.loadWeights(reader: reader, layer: layer,
+                                                device: context.device)
+        let produced = try attention.forward(hidden: hidden, tokenCount: tokens,
+                                             positionBase: 0, weights: weights, layer: layer)
+
+        // The output distribution has a long tail -- the largest element is
+        // ~40x the mean -- so normalising by the mean inflates errors on big
+        // elements into apparent percentages. RMS is the honest scale.
+        var sumSquares: Float = 0
+        for value in expected { sumSquares += value * value }
+        let rms = max((sumSquares / Float(expected.count)).squareRoot(), 1e-6)
+
+        var worst: Float = 0
+        var worstIndex = 0
+        var errorSquares: Float = 0
+        for i in expected.indices {
+            let delta = abs(Float(produced[i]) - expected[i])
+            errorSquares += delta * delta
+            let relative = delta / rms
+            if relative > worst { worst = relative; worstIndex = i }
+        }
+        let relativeRMS = (errorSquares / Float(expected.count)).squareRoot() / rms
+
+        // The tolerance is derived from the number format rather than picked.
+        // Outputs are FP16, whose significand is 11 bits, so the largest element
+        // carries an unavoidable quantisation of maxAbs * 2^-11. Expressed
+        // against RMS — and this output's peak is ~26x its RMS — that alone
+        // permits over 1e-2. A fixed threshold below that would fail a correct
+        // kernel; two ULP leaves room for accumulation without hiding a bug.
+        let maxAbs = expected.map(abs).max() ?? 1
+        let ulpBound = maxAbs * Float(exp2(-11.0)) / rms
+        let maxTolerance = 2 * ulpBound
+        let rmsTolerance: Float = 1e-3
+
+        let sliding = info["sliding"] as! Bool
+        print("layer \(layer), \(tokens) tokens, \(sliding ? "sliding" : "full") attention")
+        print(String(format: "error vs RMS: max %.3e (bound %.3e), RMS %.3e (bound %.1e)",
+                     worst, maxTolerance, relativeRMS, rmsTolerance))
+        print(String(format: "|y| RMS %.4f, peak %.3f (%.1fx RMS)", rms, maxAbs, maxAbs / rms))
+
+        if relativeRMS < rmsTolerance && worst < maxTolerance {
+            print("\nPASS — GPU attention matches the NumPy reference within FP16 resolution")
+        } else {
+            print("\nFAIL — attention diverges beyond what the format explains")
+            exit(1)
+        }
+    } catch {
+        FileHandle.standardError.write(Data("attention check failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -234,6 +311,14 @@ case "trace-routing":
         exit(2)
     }
     runRoutingTrace(model: model, layer: layer, tokens: tokens)
+case "check-attention":
+    let attArgs = Array(arguments.dropFirst())
+    guard attArgs.count == 2 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit check-attention <gwt-dir> <reference-dir>\n".utf8))
+        exit(2)
+    }
+    runAttentionCheck(model: attArgs[0], reference: attArgs[1])
 case "check-expert":
     let rest = Array(arguments.dropFirst())
     guard rest.count == 2 else {
@@ -263,6 +348,7 @@ case nil:
       verify-expert    check the Metal kernel against real GPT-OSS weights
       install          stream and repack the checkpoint into a .gwt directory
       check-expert     run one installed expert and compare against a reference
+      check-attention  run one layer's attention and compare against a reference
       trace-routing    measure real router skew and resulting cache hit rates
     """)
 }

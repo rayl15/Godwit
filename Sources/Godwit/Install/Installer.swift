@@ -212,6 +212,13 @@ public struct Installer {
             // everything downstream, the router picks experts, and sinks sit
             // inside a softmax. Copied as BF16 rather than quantised.
             for (suffix, tensor) in [
+                // attention_bias is true for GPT-OSS: q/k/v/o all carry biases,
+                // which most contemporary models omit. Forgetting them produces
+                // an attention block that runs and is simply wrong.
+                ("q_bias", "model.layers.\(layer).self_attn.q_proj.bias"),
+                ("k_bias", "model.layers.\(layer).self_attn.k_proj.bias"),
+                ("v_bias", "model.layers.\(layer).self_attn.v_proj.bias"),
+                ("o_bias", "model.layers.\(layer).self_attn.o_proj.bias"),
                 ("input_norm", "model.layers.\(layer).input_layernorm.weight"),
                 ("post_norm", "model.layers.\(layer).post_attention_layernorm.weight"),
                 ("router_w", "model.layers.\(layer).mlp.router.weight"),

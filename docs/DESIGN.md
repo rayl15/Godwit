@@ -133,6 +133,21 @@ NVMe straight into VRAM.
 Not a problem today, but the streaming interface should not assume zero-copy in
 its *shape*, so a future port is a new backend rather than a rewrite.
 
+## Numerical precision
+
+Activations are FP16 throughout: q, k, v, the attention output, and the residual
+stream. That is the KV cache format the memory budget assumes, so it is a
+constraint rather than a preference.
+
+Measured cost, from `check-attention` against an FP32 reference: **RMS relative
+error ~3e-4**, stable from 1 to 200 tokens. Peak element error tracks one FP16
+ULP on the largest output, which for this layer is ~1.3e-2 relative to RMS
+because the output's peak is ~26x its RMS.
+
+The peak figure is a property of the format, not of the kernel, and tolerances
+in the checks are derived from it rather than chosen. A fixed threshold tight
+enough to look impressive would fail a correct implementation.
+
 ## Non-goals
 
 - Beating MLX or llama.cpp on machines where the model already fits. We lose
