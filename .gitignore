@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+scratch/
+*.gwt/
+.DS_Store
+Package.resolved
