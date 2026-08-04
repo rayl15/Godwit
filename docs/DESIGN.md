@@ -76,16 +76,21 @@ is off the table and we should reconsider. `MXFP4.swift` is the CPU ground
 truth; the next step is a Metal kernel validated against it and benchmarked
 against a plain affine-int4 kernel of the same shape.
 
-### 2. What is the real ceiling at a 30:1 stream-to-resident ratio?
+### 2. What is the real ceiling at a 30:1 stream-to-resident ratio? — ANSWERED
 
-TurboFieldfare streams 12.9 GB against 1.35 GB resident, roughly 10:1, and lands
-at 5-6 tok/s on an M2. GPT-OSS-120B on a 16 GB Mac is closer to 30:1. If
-throughput degrades linearly we are looking at 1-2 tok/s, which is usable for
-batch work and painful for chat.
+**Decode 3-5 tok/s; prefill costs a full pass over the routed pool per chunk.**
+Worked through in [ESTIMATE.md](ESTIMATE.md) against measured NVMe bandwidth and
+a hit-rate simulation calibrated to TurboFieldfare's published numbers.
 
-Worth estimating analytically from expert size, top-k, layer count, and measured
-NVMe throughput *before* writing kernels. This is an afternoon with a
-spreadsheet and it could redirect the whole project.
+Two consequences carry into the design:
+
+- **Chunk size is a first-class parameter.** Any chunk past ~256 tokens touches
+  every expert in a layer, so prefill costs 56.7 GiB of reads whether the chunk
+  holds 256 tokens or 8,192. Activations are ~67 MiB at 4,096 tokens, so there
+  is no reason to chunk small. Whole-prompt chunks give a flat ~11 s TTFT.
+- **There is no shared expert to overlap against.** TurboFieldfare hid read time
+  behind its resident shared-MLP branch; GPT-OSS has no such branch. Finding
+  something else to overlap is now an open design problem in its own right.
 
 ### 3. Does external Thunderbolt NVMe hold up?
 
