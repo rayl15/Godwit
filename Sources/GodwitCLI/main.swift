@@ -76,6 +76,36 @@ func runExpertVerification(directory: String) {
     }
 }
 
+func runInstall(directory: String, layerLimit: Int?) async {
+    do {
+        let options = Installer.Options(layerLimit: layerLimit)
+        let installer = Installer(options: options)
+        let target = URL(fileURLWithPath: directory)
+
+        let started = Date()
+        print("installing \(options.repository) -> \(directory)")
+        if let layerLimit { print("limited to the first \(layerLimit) layers") }
+
+        let manifest = try await installer.install(to: target) { progress in
+            let gib = Double(progress.bytesWritten) / 1_073_741_824
+            print(String(format: "  %-8@ %3d/%-3d  %7.2f GiB",
+                         progress.stage as NSString,
+                         progress.completed, progress.total, gib))
+        }
+        try manifest.validate(at: target)
+
+        let minutes = Date().timeIntervalSince(started) / 60
+        print(String(format: "\ndone in %.1f min — %.2f GiB, %d layers%@",
+                     minutes,
+                     Double(manifest.bytesWritten) / 1_073_741_824,
+                     manifest.layerCount,
+                     manifest.isComplete ? "" : " (PARTIAL install)"))
+    } catch {
+        FileHandle.standardError.write(Data("install failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -83,6 +113,25 @@ case "version":
     print("godwit 0.0.1-dev")
 case "bench" where arguments.dropFirst().first == "dequant":
     runDequantBenchmark()
+case "install":
+    var target: String?
+    var limit: Int?
+    var rest = arguments.dropFirst().makeIterator()
+    while let flag = rest.next() {
+        switch flag {
+        case "--output", "-o": target = rest.next()
+        case "--layers": limit = rest.next().flatMap(Int.init)
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    guard let target else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit install --output <dir> [--layers N]\n".utf8))
+        exit(2)
+    }
+    await runInstall(directory: target, layerLimit: limit)
 case "verify-expert":
     guard let directory = arguments.dropFirst().first else {
         FileHandle.standardError.write(Data("usage: godwit verify-expert <fixture-dir>\n".utf8))
@@ -102,5 +151,6 @@ case nil:
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights
+      install          stream and repack the checkpoint into a .gwt directory
     """)
 }

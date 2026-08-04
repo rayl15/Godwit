@@ -58,8 +58,22 @@ What exists:
   fully testable without a GPU
 - `ExpertBlobReader` — `pread` into page-aligned, zero-copy GPU memory
 - Fused MXFP4 dequant-GEMV kernels, benchmarked against affine int4
+- **Installer** — streams the checkpoint and repacks it into `.gwt`, never
+  materialising a shard. Verified byte-exact against the source.
 
-Not started: the installer, attention, KV cache, tokenizer, sampling.
+Not started: attention, KV cache, tokenizer, sampling — i.e. inference.
+
+### Installing
+
+```bash
+godwit install --output model.gwt            # ~57 GiB, hours
+godwit install --output model.gwt --layers 1 # one layer, for testing the pipeline
+python3 Scripts/analysis/verify_install.py model.gwt
+```
+
+Experts are copied through as MXFP4 without ever being dequantised; only their
+arrangement changes. The trunk arrives as BF16 and is quantised to int8 on the
+way to disk, which is lossy by design and measured.
 
 ## Requirements
 
