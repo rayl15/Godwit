@@ -95,3 +95,47 @@ kernel void int8_affine_gemv(
     const float total = simd_sum(acc);
     if (lane == 0) { y[row] = total; }
 }
+
+
+// int8 affine projection for a run of tokens, with bias, producing half.
+//
+// The earlier version handled one token and had no bias, so the caller looped
+// over tokens submitting a command buffer each and then added the bias on the
+// CPU. Folding both in lets a whole attention block be one submission — which
+// matters because submissions, not arithmetic, dominate decode.
+kernel void int8_affine_gemv_bias_batched(
+    device const uchar  *codes [[buffer(0)]],
+    device const bfloat *meta  [[buffer(1)]],
+    device const bfloat *bias  [[buffer(2)]],
+    device const half   *x     [[buffer(3)]],   // [T, cols]
+    device half         *y     [[buffer(4)]],   // [T, rows]
+    constant uint       &cols  [[buffer(5)]],
+    constant uint       &rows  [[buffer(6)]],
+    uint2                group [[threadgroup_position_in_grid]],
+    uint                 lane  [[thread_index_in_threadgroup]])
+{
+    const uint row = group.x;
+    const uint token = group.y;
+    const uint groups = cols / 64u;
+    device const uchar *w = codes + row * cols;
+    device const bfloat *m = meta + row * groups * 2u;
+    device const half *xt = x + token * cols;
+
+    float acc = 0.0f;
+    for (uint g = lane; g < groups; g += kSimdWidth) {
+        const float scale = float(m[g * 2u]);
+        const float zero = float(m[g * 2u + 1u]);
+        const uint base = g * 64u;
+        float dot = 0.0f;
+        float xsum = 0.0f;
+        for (uint i = 0; i < 64u; ++i) {
+            const float xi = float(xt[base + i]);
+            dot += float(w[base + i]) * xi;
+            xsum += xi;
+        }
+        acc += scale * dot + zero * xsum;
+    }
+
+    const float total = simd_sum(acc);
+    if (lane == 0) { y[token * rows + row] = half(total + float(bias[row])); }
+}

@@ -70,7 +70,12 @@ public final class KVCache {
     }
 
     /// Appends a run of K/V for one layer at absolute `position`.
-    public func write(
+    ///
+    /// Encodes into a caller-supplied command buffer so the write joins the
+    /// surrounding attention work in one submission rather than costing two of
+    /// its own.
+    public func encodeWrite(
+        _ commands: MTLCommandBuffer,
         keys: MTLBuffer, values: MTLBuffer, layer: Int, position: Int, tokenCount: Int
     ) throws {
         let cache = layers[layer]
@@ -78,8 +83,7 @@ public final class KVCache {
                                             constants: [0: spec.headDimension])
 
         for (source, destination) in [(keys, cache.keys), (values, cache.values)] {
-            guard let commands = context.queue.makeCommandBuffer(),
-                  let encoder = commands.makeComputeCommandEncoder()
+            guard let encoder = commands.makeComputeCommandEncoder()
             else { throw MetalError.encoderCreationFailed }
             var kvHeads = UInt32(spec.keyValueHeads)
             var base = UInt32(position)
@@ -94,8 +98,6 @@ public final class KVCache {
                 MTLSize(width: tokenCount, height: spec.keyValueHeads, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
             encoder.endEncoding()
-            commands.commit()
-            commands.waitUntilCompleted()
         }
     }
 }

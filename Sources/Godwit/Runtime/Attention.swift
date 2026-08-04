@@ -81,38 +81,47 @@ public struct Attention {
         // Buffers are allocated through `context`; no direct device use here.
         let hiddenBuffer = try context.buffer(hidden)
 
-        // Projections. Biases live alongside the codes in the trunk section, so
-        // they are folded in by the caller's reference; here the int8 GEMV emits
-        // the linear part and bias is added during reshaping.
-        let q = try project(hiddenBuffer, codes: weights.qCodes, bias: weights.qBias,
-                            rows: qWidth, cols: spec.hiddenSize, tokens: tokenCount)
-        let k = try project(hiddenBuffer, codes: weights.kCodes, bias: weights.kBias,
-                            rows: kvWidth, cols: spec.hiddenSize, tokens: tokenCount)
-        let v = try project(hiddenBuffer, codes: weights.vCodes, bias: weights.vBias,
-                            rows: kvWidth, cols: spec.hiddenSize, tokens: tokenCount)
+        // Everything below goes into a single command buffer. Compute encoders
+        // within one buffer run in order, so the data dependencies hold without
+        // a CPU round trip between each step — and it is those round trips,
+        // not the arithmetic, that dominate decode.
+        guard let commands = context.queue.makeCommandBuffer() else {
+            throw MetalError.encoderCreationFailed
+        }
+
+        let q = try context.emptyBuffer(of: Float16.self, count: tokenCount * qWidth)
+        let k = try context.emptyBuffer(of: Float16.self, count: tokenCount * kvWidth)
+        let v = try context.emptyBuffer(of: Float16.self, count: tokenCount * kvWidth)
+
+        try encodeProjection(commands, input: hiddenBuffer, codes: weights.qCodes,
+                             bias: weights.qBias, output: q,
+                             rows: qWidth, cols: spec.hiddenSize, tokens: tokenCount)
+        try encodeProjection(commands, input: hiddenBuffer, codes: weights.kCodes,
+                             bias: weights.kBias, output: k,
+                             rows: kvWidth, cols: spec.hiddenSize, tokens: tokenCount)
+        try encodeProjection(commands, input: hiddenBuffer, codes: weights.vCodes,
+                             bias: weights.vBias, output: v,
+                             rows: kvWidth, cols: spec.hiddenSize, tokens: tokenCount)
 
         // Rotate Q and K. V is deliberately untouched: position information
         // belongs in the similarity, not in the payload.
         let (cosBuffer, sinBuffer) = try ropeTables(tokenCount: tokenCount,
                                                     positionBase: positionBase)
-        try applyRoPE(q, tokens: tokenCount, heads: heads,
-                      cosines: cosBuffer, sines: sinBuffer)
-        try applyRoPE(k, tokens: tokenCount, heads: kvHeads,
-                      cosines: cosBuffer, sines: sinBuffer)
+        try encodeRoPE(commands, vectors: q, tokens: tokenCount, heads: heads,
+                       cosines: cosBuffer, sines: sinBuffer)
+        try encodeRoPE(commands, vectors: k, tokens: tokenCount, heads: kvHeads,
+                       cosines: cosBuffer, sines: sinBuffer)
 
-        // Append this run's keys and values, then attend over everything the
-        // cache holds. This is what makes decode linear: the previous tokens'
-        // projections are already there and are never recomputed.
-        try cache.write(keys: k, values: v, layer: layer,
-                        position: positionBase, tokenCount: tokenCount)
+        try cache.encodeWrite(commands, keys: k, values: v, layer: layer,
+                              position: positionBase, tokenCount: tokenCount)
         let layerCache = cache.layers[layer]
 
         let attended = try context.emptyBuffer(of: Float16.self, count: tokenCount * qWidth)
         let pipeline = try context.pipeline(shader: "attention", function: "gqa_attention_sinks",
                                             constants: [0: spec.headDimension])
-        guard let commands = context.queue.makeCommandBuffer(),
-              let encoder = commands.makeComputeCommandEncoder()
-        else { throw MetalError.encoderCreationFailed }
+        guard let encoder = commands.makeComputeCommandEncoder() else {
+            throw MetalError.encoderCreationFailed
+        }
 
         var keyCount = UInt32(positionBase + tokenCount)
         var headCount = UInt32(heads)
@@ -121,6 +130,7 @@ public struct Attention {
                             ? spec.layers[layer].window : 0)
         var base = UInt32(positionBase)
         var scale = 1 / Float(headDim).squareRoot()
+        var ring = UInt32(layerCache.ring)
 
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(q, offset: 0, index: 0)
@@ -134,64 +144,71 @@ public struct Attention {
         encoder.setBytes(&window, length: 4, index: 8)
         encoder.setBytes(&base, length: 4, index: 9)
         encoder.setBytes(&scale, length: 4, index: 10)
-        var ring = UInt32(layerCache.ring)
         encoder.setBytes(&ring, length: 4, index: 11)
         encoder.dispatchThreadgroups(
             MTLSize(width: tokenCount, height: heads, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
+
+        let projected = try context.emptyBuffer(of: Float16.self,
+                                                count: tokenCount * spec.hiddenSize)
+        try encodeProjection(commands, input: attended, codes: weights.oCodes,
+                             bias: weights.oBias, output: projected,
+                             rows: spec.hiddenSize, cols: qWidth, tokens: tokenCount)
+
         commands.commit()
         commands.waitUntilCompleted()
 
-        // Output projection.
-        let projected = try project(attended, codes: weights.oCodes, bias: weights.oBias,
-                                    rows: spec.hiddenSize, cols: qWidth, tokens: tokenCount)
         let produced = projected.contents().bindMemory(
             to: Float16.self, capacity: tokenCount * spec.hiddenSize)
         return Array(UnsafeBufferPointer(start: produced, count: tokenCount * spec.hiddenSize))
     }
 
-    /// int8 affine GEMV, one token at a time.
-    ///
-    /// A GEMM would be better for prefill; this exists to establish correctness
-    /// before shape-specialised kernels.
-    private func project(
-        _ input: MTLBuffer, codes: MTLBuffer, bias: MTLBuffer,
-        rows: Int, cols: Int, tokens: Int
-    ) throws -> MTLBuffer {
-        let output = try context.emptyBuffer(of: Float16.self, count: tokens * rows)
-        let scratch = try context.emptyBuffer(of: Float.self, count: rows)
-        let pipeline = try context.pipeline(shader: "router", function: "int8_affine_gemv")
-        let metaOffset = rows * cols
-
-        for token in 0..<tokens {
-            guard let commands = context.queue.makeCommandBuffer(),
-                  let encoder = commands.makeComputeCommandEncoder()
-            else { throw MetalError.encoderCreationFailed }
-            var colsValue = UInt32(cols)
-            encoder.setComputePipelineState(pipeline)
-            encoder.setBuffer(codes, offset: 0, index: 0)
-            encoder.setBuffer(codes, offset: metaOffset, index: 1)
-            encoder.setBuffer(input, offset: token * cols * 2, index: 2)
-            encoder.setBuffer(scratch, offset: 0, index: 3)
-            encoder.setBytes(&colsValue, length: 4, index: 4)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: rows, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            encoder.endEncoding()
-            commands.commit()
-            commands.waitUntilCompleted()
-
-            let source = scratch.contents().bindMemory(to: Float.self, capacity: rows)
-            let biases = bias.contents().bindMemory(to: UInt16.self, capacity: rows)
-            let destination = output.contents()
-                .advanced(by: token * rows * 2)
-                .bindMemory(to: Float16.self, capacity: rows)
-            for row in 0..<rows {
-                destination[row] = Float16(source[row] + BFloat16.toFloat(biases[row]))
-            }
+    /// Encodes an int8 projection over all tokens into an existing buffer.
+    private func encodeProjection(
+        _ commands: MTLCommandBuffer, input: MTLBuffer, codes: MTLBuffer,
+        bias: MTLBuffer, output: MTLBuffer, rows: Int, cols: Int, tokens: Int
+    ) throws {
+        guard let encoder = commands.makeComputeCommandEncoder() else {
+            throw MetalError.encoderCreationFailed
         }
-        return output
+        var colsValue = UInt32(cols)
+        var rowsValue = UInt32(rows)
+        let pipeline = try context.pipeline(shader: "router",
+                                            function: "int8_affine_gemv_bias_batched")
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(codes, offset: 0, index: 0)
+        encoder.setBuffer(codes, offset: rows * cols, index: 1)
+        encoder.setBuffer(bias, offset: 0, index: 2)
+        encoder.setBuffer(input, offset: 0, index: 3)
+        encoder.setBuffer(output, offset: 0, index: 4)
+        encoder.setBytes(&colsValue, length: 4, index: 5)
+        encoder.setBytes(&rowsValue, length: 4, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows, height: tokens, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    private func encodeRoPE(
+        _ commands: MTLCommandBuffer, vectors: MTLBuffer, tokens: Int, heads: Int,
+        cosines: MTLBuffer, sines: MTLBuffer
+    ) throws {
+        guard let encoder = commands.makeComputeCommandEncoder() else {
+            throw MetalError.encoderCreationFailed
+        }
+        let pipeline = try context.pipeline(shader: "attention", function: "apply_rope",
+                                            constants: [0: spec.headDimension])
+        var headCount = UInt32(heads)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(vectors, offset: 0, index: 0)
+        encoder.setBuffer(cosines, offset: 0, index: 1)
+        encoder.setBuffer(sines, offset: 0, index: 2)
+        encoder.setBytes(&headCount, length: 4, index: 3)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: tokens, height: heads, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     private func ropeTables(tokenCount: Int, positionBase: Int) throws -> (MTLBuffer, MTLBuffer) {
@@ -206,26 +223,4 @@ public struct Attention {
         return (try context.buffer(cosines), try context.buffer(sines))
     }
 
-    private func applyRoPE(
-        _ vectors: MTLBuffer, tokens: Int, heads: Int,
-        cosines: MTLBuffer, sines: MTLBuffer
-    ) throws {
-        let pipeline = try context.pipeline(shader: "attention", function: "apply_rope",
-                                            constants: [0: spec.headDimension])
-        guard let commands = context.queue.makeCommandBuffer(),
-              let encoder = commands.makeComputeCommandEncoder()
-        else { throw MetalError.encoderCreationFailed }
-        var headCount = UInt32(heads)
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(vectors, offset: 0, index: 0)
-        encoder.setBuffer(cosines, offset: 0, index: 1)
-        encoder.setBuffer(sines, offset: 0, index: 2)
-        encoder.setBytes(&headCount, length: 4, index: 3)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: tokens, height: heads, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        encoder.endEncoding()
-        commands.commit()
-        commands.waitUntilCompleted()
-    }
 }

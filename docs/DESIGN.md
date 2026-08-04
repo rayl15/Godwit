@@ -212,25 +212,26 @@ placement, and the lookup were never the constraint.
 
 ## Where decode time actually goes
 
-Measured over 40 generated tokens at 1.21 tok/s, eight expert slots:
+Measured over 40 generated tokens at 1.42 tok/s, eight expert slots:
 
 | | Time | Share |
 | --- | ---: | ---: |
-| Expert reads (40.4 GiB at 5.08 GiB/s) | 8.0 s | 24% |
-| Expert arithmetic (143G weights at 40 G w/s) | 3.6 s | 11% |
-| **Command-buffer round trips** | **21.5 s** | **65%** |
+| Expert reads (40.4 GiB at 5.08 GiB/s) | 8.0 s | 28% |
+| Expert arithmetic (143G weights at 40 G w/s) | 3.6 s | 13% |
+| Everything else | 16.7 s | 59% |
 
-Neither I/O nor arithmetic dominates. `ExpertRunner.apply` submits its own
-command buffer and blocks on it — three encoders, commit, `waitUntilCompleted`
-— once per expert. That is **144 full CPU-GPU round trips per token**, at
-roughly 5.7 ms each.
+Batching cut command buffers from 504 per token to 108 and bought 17%. At the
+~1.6 ms per submission the earlier numbers implied, the remaining 108 should
+account for about 7 s of the 16.7 s, so submissions no longer explain the gap.
 
-Batching a layer's experts into one command buffer, and ideally the whole
-layer's work, is now worth more than any further work on reads or kernels.
+**This has now been attributed by arithmetic twice and been wrong twice** — the
+first estimate counted 144 command buffers where there were 504. The remaining
+59% needs instrumentation (Metal system trace) rather than a third estimate.
+Candidates worth measuring rather than assuming: per-call `MTLBuffer`
+allocation, of which there are several hundred per token; CPU-side RMSNorm and
+residual arithmetic; and GPU idle time between the 108 synchronisation points.
 
-The feasibility estimate assumed reads were the constraint. They were, in the
-model; they are not, in this implementation, because the implementation spends
-two thirds of its time waiting on submissions the model never accounted for.
+The feasibility estimate assumed reads were the constraint. They are 28% of it.
 
 ## Numerical precision
 

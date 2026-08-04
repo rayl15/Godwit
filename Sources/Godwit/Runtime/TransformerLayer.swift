@@ -122,12 +122,9 @@ public struct TransformerLayer {
                 }
             }
 
-            var combined = [Float](repeating: 0, count: width)
-            for (position, expertWeights) in resolved.enumerated() {
-                let output = try experts.apply(slice, weights: expertWeights)
-                let scale = decision.weights[position]
-                for i in 0..<width { combined[i] += output[i] * scale }
-            }
+            let combined = try experts.applyBatch(
+                slice,
+                experts: resolved.enumerated().map { ($1, decision.weights[$0]) })
 
             for i in 0..<width {
                 stream[token * width + i] = Float16(

@@ -78,6 +78,94 @@ public struct ExpertRunner {
         return Weights(buffer: buffer, offsets: sectionOffsets)
     }
 
+    /// Applies every selected expert to one token, in a single submission.
+    ///
+    /// The routed outputs are combined on the GPU by `expert_accumulate`, so
+    /// nothing crosses to the CPU until the layer's contribution is complete.
+    /// Previously each expert was its own command buffer and each was waited
+    /// on, which at four experts across 36 layers was 144 round trips a token —
+    /// and round trips, not arithmetic, were most of decode.
+    public func applyBatch(
+        _ input: [Float16], experts: [(weights: Weights, weight: Float)]
+    ) throws -> [Float] {
+        precondition(input.count == hiddenSize, "expected \(hiddenSize) inputs")
+        guard !experts.isEmpty else { return [Float](repeating: 0, count: hiddenSize) }
+
+        let gateUpRows = 2 * intermediateSize
+        let xBuffer = try context.buffer(input)
+        let combined = try context.emptyBuffer(of: Float.self, count: hiddenSize)
+
+        let gemv = try context.pipeline(
+            shader: "expert",
+            function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
+        let activation = try context.pipeline(shader: "expert",
+                                              function: "gptoss_expert_activation")
+        let accumulate = try context.pipeline(shader: "expert", function: "expert_accumulate")
+
+        guard let commands = context.queue.makeCommandBuffer() else {
+            throw MetalError.encoderCreationFailed
+        }
+
+        // Each expert needs its own scratch: encoders in one command buffer run
+        // in order, but sharing scratch would still be a write-after-read hazard
+        // the ordering does not resolve.
+        for (expertWeights, routingWeight) in experts {
+            let gateUp = try context.emptyBuffer(of: Float.self, count: gateUpRows)
+            let activated = try context.emptyBuffer(of: Float16.self, count: intermediateSize)
+            let output = try context.emptyBuffer(of: Float.self, count: hiddenSize)
+
+            try encodeGEMV(commands, pipeline: gemv, source: expertWeights.buffer,
+                           blocksOffset: expertWeights.offset(.gateUpBlocks),
+                           scalesOffset: expertWeights.offset(.gateUpScales),
+                           biasOffset: expertWeights.offset(.gateUpBias),
+                           x: xBuffer, y: gateUp,
+                           rows: gateUpRows, cols: hiddenSize)
+
+            guard let encoder = commands.makeComputeCommandEncoder() else {
+                throw MetalError.encoderCreationFailed
+            }
+            var width = UInt32(intermediateSize)
+            var limit = swigluLimit
+            var alpha = swigluAlpha
+            encoder.setComputePipelineState(activation)
+            encoder.setBuffer(gateUp, offset: 0, index: 0)
+            encoder.setBuffer(activated, offset: 0, index: 1)
+            encoder.setBytes(&width, length: 4, index: 2)
+            encoder.setBytes(&limit, length: 4, index: 3)
+            encoder.setBytes(&alpha, length: 4, index: 4)
+            encoder.dispatchThreads(MTLSize(width: intermediateSize, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            encoder.endEncoding()
+
+            try encodeGEMV(commands, pipeline: gemv, source: expertWeights.buffer,
+                           blocksOffset: expertWeights.offset(.downBlocks),
+                           scalesOffset: expertWeights.offset(.downScales),
+                           biasOffset: expertWeights.offset(.downBias),
+                           x: activated, y: output,
+                           rows: hiddenSize, cols: intermediateSize)
+
+            guard let combiner = commands.makeComputeCommandEncoder() else {
+                throw MetalError.encoderCreationFailed
+            }
+            var scale = routingWeight
+            var count = UInt32(hiddenSize)
+            combiner.setComputePipelineState(accumulate)
+            combiner.setBuffer(output, offset: 0, index: 0)
+            combiner.setBuffer(combined, offset: 0, index: 1)
+            combiner.setBytes(&scale, length: 4, index: 2)
+            combiner.setBytes(&count, length: 4, index: 3)
+            combiner.dispatchThreads(MTLSize(width: hiddenSize, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            combiner.endEncoding()
+        }
+
+        commands.commit()
+        commands.waitUntilCompleted()
+
+        let produced = combined.contents().bindMemory(to: Float.self, capacity: hiddenSize)
+        return Array(UnsafeBufferPointer(start: produced, count: hiddenSize))
+    }
+
     /// Applies one expert to a single token's hidden state.
     ///
     /// Returns the expert's contribution before routing-weight scaling; the
