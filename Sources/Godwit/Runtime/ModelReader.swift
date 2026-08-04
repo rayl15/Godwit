@@ -56,6 +56,12 @@ public final class ModelReader {
         return try read(layer: layer, offset: offset, length: span.length, device: device)
     }
 
+    /// Reads an entire expert stride, all six sub-tensors in one call.
+    public func loadExpertStride(layer: Int, expert: Int, device: MTLDevice) throws -> MTLBuffer {
+        try read(layer: layer, offset: expert * manifest.expertStride,
+                 length: manifest.expertStride, device: device)
+    }
+
     private func read(layer: Int, offset: Int, length: Int, device: MTLDevice) throws -> MTLBuffer {
         let fd = try descriptor(forLayer: layer)
         let pageSize = Int(getpagesize())

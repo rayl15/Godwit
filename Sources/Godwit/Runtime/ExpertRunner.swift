@@ -40,34 +40,42 @@ public struct ExpertRunner {
         self.swigluAlpha = swigluAlpha ?? spec.activationAlpha
     }
 
-    /// Weights for one expert, already resident in GPU memory.
+    /// One expert as a single buffer plus the offsets of its six sub-tensors.
     ///
-    /// Held separately from the computation so a caller can keep these across
-    /// tokens — which is exactly what the slot cache will do.
+    /// A slot holds the whole expert stride, so the sections are addressed by
+    /// offset rather than being separate allocations. That is what lets a cache
+    /// hit cost nothing: the bytes are already where the GPU expects them.
     public struct Weights {
-        public let gateUpBlocks: MTLBuffer
-        public let gateUpScales: MTLBuffer
-        public let gateUpBias: MTLBuffer
-        public let downBlocks: MTLBuffer
-        public let downScales: MTLBuffer
-        public let downBias: MTLBuffer
+        public let buffer: MTLBuffer
+        public let offsets: [ExpertLayout.Section: Int]
+
+        public init(buffer: MTLBuffer, offsets: [ExpertLayout.Section: Int]) {
+            self.buffer = buffer
+            self.offsets = offsets
+        }
+
+        func offset(_ section: ExpertLayout.Section) -> Int { offsets[section] ?? 0 }
     }
 
+    /// Section offsets within an expert stride, from the manifest.
+    public var sectionOffsets: [ExpertLayout.Section: Int] {
+        var result: [ExpertLayout.Section: Int] = [:]
+        for section in ExpertLayout.Section.allCases {
+            if let span = reader.manifest.expertSections[section.rawValue] {
+                result[section] = span.offset
+            }
+        }
+        return result
+    }
+
+    /// Reads one expert into fresh memory, bypassing the cache.
+    ///
+    /// Used by the verification commands, which want to read a specific expert
+    /// without disturbing cache state.
     public func loadWeights(layer: Int, expert: Int) throws -> Weights {
-        let device = context.device
-        return Weights(
-            gateUpBlocks: try reader.loadSection(layer: layer, expert: expert,
-                                                 section: .gateUpBlocks, device: device),
-            gateUpScales: try reader.loadSection(layer: layer, expert: expert,
-                                                 section: .gateUpScales, device: device),
-            gateUpBias: try reader.loadSection(layer: layer, expert: expert,
-                                               section: .gateUpBias, device: device),
-            downBlocks: try reader.loadSection(layer: layer, expert: expert,
-                                               section: .downBlocks, device: device),
-            downScales: try reader.loadSection(layer: layer, expert: expert,
-                                               section: .downScales, device: device),
-            downBias: try reader.loadSection(layer: layer, expert: expert,
-                                             section: .downBias, device: device))
+        let buffer = try reader.loadExpertStride(layer: layer, expert: expert,
+                                                 device: context.device)
+        return Weights(buffer: buffer, offsets: sectionOffsets)
     }
 
     /// Applies one expert to a single token's hidden state.
@@ -94,9 +102,11 @@ public struct ExpertRunner {
         }
 
         // gate_up: [2F, H] @ [H] -> [2F]
-        try encodeGEMV(commands, pipeline: gemv,
-                       blocks: weights.gateUpBlocks, scales: weights.gateUpScales,
-                       bias: weights.gateUpBias, x: xBuffer, y: gateUpBuffer,
+        try encodeGEMV(commands, pipeline: gemv, source: weights.buffer,
+                       blocksOffset: weights.offset(.gateUpBlocks),
+                       scalesOffset: weights.offset(.gateUpScales),
+                       biasOffset: weights.offset(.gateUpBias),
+                       x: xBuffer, y: gateUpBuffer,
                        rows: gateUpRows, cols: hiddenSize)
 
         // Interleaved split, asymmetric clamp, sigmoid gate. See expert.metal.
@@ -117,9 +127,11 @@ public struct ExpertRunner {
         encoder.endEncoding()
 
         // down: [H, F] @ [F] -> [H]
-        try encodeGEMV(commands, pipeline: gemv,
-                       blocks: weights.downBlocks, scales: weights.downScales,
-                       bias: weights.downBias, x: activated, y: output,
+        try encodeGEMV(commands, pipeline: gemv, source: weights.buffer,
+                       blocksOffset: weights.offset(.downBlocks),
+                       scalesOffset: weights.offset(.downScales),
+                       biasOffset: weights.offset(.downBias),
+                       x: activated, y: output,
                        rows: hiddenSize, cols: intermediateSize)
 
         commands.commit()
@@ -131,7 +143,7 @@ public struct ExpertRunner {
 
     private func encodeGEMV(
         _ commands: MTLCommandBuffer, pipeline: MTLComputePipelineState,
-        blocks: MTLBuffer, scales: MTLBuffer, bias: MTLBuffer,
+        source: MTLBuffer, blocksOffset: Int, scalesOffset: Int, biasOffset: Int,
         x: MTLBuffer, y: MTLBuffer, rows: Int, cols: Int
     ) throws {
         guard let encoder = commands.makeComputeCommandEncoder() else {
@@ -140,9 +152,9 @@ public struct ExpertRunner {
         var colsValue = UInt32(cols)
         var rowsValue = UInt32(rows)
         encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(blocks, offset: 0, index: 0)
-        encoder.setBuffer(scales, offset: 0, index: 1)
-        encoder.setBuffer(bias, offset: 0, index: 2)
+        encoder.setBuffer(source, offset: blocksOffset, index: 0)
+        encoder.setBuffer(source, offset: scalesOffset, index: 1)
+        encoder.setBuffer(source, offset: biasOffset, index: 2)
         encoder.setBuffer(x, offset: 0, index: 3)
         encoder.setBuffer(y, offset: 0, index: 4)
         encoder.setBytes(&colsValue, length: MemoryLayout<UInt32>.size, index: 5)

@@ -65,7 +65,7 @@ public struct TransformerLayer {
     /// returned updated.
     public func forward(
         hidden: [Float16], tokenCount: Int, positionBase: Int,
-        weights: Weights, cache: KVCache
+        weights: Weights, cache: KVCache, expertCache: ExpertCache? = nil
     ) throws -> (hidden: [Float16], trace: Trace) {
         let width = spec.hiddenSize
         var stream = hidden
@@ -85,9 +85,10 @@ public struct TransformerLayer {
 
         var decisions: [Router.Decision] = []
         decisions.reserveCapacity(tokenCount)
-        // One expert's weights are ~12.6 MiB, so reuse within a batch matters
-        // even before a real slot cache exists.
-        var loaded: [Int: ExpertRunner.Weights] = [:]
+        // Fallback for callers without a persistent cache: reuse within this
+        // batch only. An expert is ~12.6 MiB, so even that is worth doing.
+        var local: [Int: ExpertRunner.Weights] = [:]
+        let offsets = experts.sectionOffsets
 
         for token in 0..<tokenCount {
             let slice = Array(normed[(token * width)..<((token + 1) * width)])
@@ -96,15 +97,33 @@ public struct TransformerLayer {
                                             bias: weights.routerBias)
             decisions.append(decision)
 
-            var combined = [Float](repeating: 0, count: width)
-            for (position, expert) in decision.experts.enumerated() {
-                let expertWeights: ExpertRunner.Weights
-                if let cached = loaded[expert] {
-                    expertWeights = cached
-                } else {
-                    expertWeights = try experts.loadWeights(layer: index, expert: expert)
-                    loaded[expert] = expertWeights
+            // Ask for all of this token's experts at once, so the planner sees
+            // the whole working set and never evicts one it is about to need.
+            var resolved: [ExpertRunner.Weights] = []
+            if let expertCache {
+                let unique = Array(Set(decision.experts))
+                let slots = try expertCache.acquire(layer: index, experts: unique)
+                var slotByExpert: [Int: Int] = [:]
+                for (expert, slot) in zip(unique, slots) { slotByExpert[expert] = slot }
+                resolved = decision.experts.map { expert in
+                    ExpertRunner.Weights(
+                        buffer: expertCache.buffer(layer: index, slot: slotByExpert[expert]!),
+                        offsets: offsets)
                 }
+            } else {
+                for expert in decision.experts {
+                    if let cached = local[expert] {
+                        resolved.append(cached)
+                    } else {
+                        let loaded = try experts.loadWeights(layer: index, expert: expert)
+                        local[expert] = loaded
+                        resolved.append(loaded)
+                    }
+                }
+            }
+
+            var combined = [Float](repeating: 0, count: width)
+            for (position, expertWeights) in resolved.enumerated() {
                 let output = try experts.apply(slice, weights: expertWeights)
                 let scale = decision.weights[position]
                 for i in 0..<width { combined[i] += output[i] * scale }

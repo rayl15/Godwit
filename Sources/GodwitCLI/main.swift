@@ -127,7 +127,7 @@ func runLogits(model: String, tokens: [Int], topK: Int) {
     }
 }
 
-func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = []) {
+func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [], slots: Int = 8) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
@@ -135,18 +135,25 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = []) 
         let weights = try runner.loadWeights()
 
         let cache = try runner.makeCache(maxContext: tokens.count + count + 16)
+        let expertCache = try runner.makeExpertCache(slots: slots)
+        FileHandle.standardError.write(Data(String(
+            format: "expert cache: %d slots x %d layers = %.2f GiB\n",
+            expertCache.slotCount, expertCache.layerCount,
+            Double(expertCache.byteCount) / 1_073_741_824).utf8))
         var produced: [Int] = []
 
         // Prefill: the whole prompt in one pass, filling the cache.
         let prefillStart = Date()
         var logits = try runner.logits(tokens: tokens, positionBase: 0,
-                                       cache: cache, weights: weights)
+                                       cache: cache, weights: weights,
+                                       expertCache: expertCache)
         let prefill = Date().timeIntervalSince(prefillStart)
         FileHandle.standardError.write(Data(String(
             format: "prefill %d tokens in %.2fs (%.1f tok/s)\n",
             tokens.count, prefill, Double(tokens.count) / prefill).utf8))
 
         // Decode: one token at a time against the cache.
+        expertCache.resetStats()
         let decodeStart = Date()
         for step in 0..<count {
             var best = 0
@@ -155,7 +162,8 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = []) 
             if stop.contains(best) { break }
             if step == count - 1 { break }
             logits = try runner.logits(tokens: [best], positionBase: cache.length,
-                                       cache: cache, weights: weights)
+                                       cache: cache, weights: weights,
+                                       expertCache: expertCache)
             let rate = Double(step + 1) / Date().timeIntervalSince(decodeStart)
             FileHandle.standardError.write(Data(String(
                 format: "\rdecode %d/%d  (%.2f tok/s)", step + 1, count, rate).utf8))
@@ -164,6 +172,11 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = []) 
         FileHandle.standardError.write(Data(String(
             format: "\ndecode %d tokens in %.2fs (%.2f tok/s)\n",
             count, decode, Double(count) / decode).utf8))
+        let s = expertCache.stats
+        FileHandle.standardError.write(Data(String(
+            format: "expert cache: %.1f%% hit (%d hits, %d misses), %.2f GiB read\n",
+            s.hitRate * 100, s.hits, s.misses,
+            Double(s.bytesRead) / 1_073_741_824).utf8))
 
         print(produced.map(String.init).joined(separator: ","))
     } catch {
@@ -648,6 +661,7 @@ case "generate":
     var genTokens: [Int] = []
     var genCount = 16
     var genStop: [Int] = []
+    var genSlots = 8
     var genFlags = arguments.dropFirst().makeIterator()
     while let flag = genFlags.next() {
         switch flag {
@@ -655,6 +669,7 @@ case "generate":
         case "--tokens": genTokens = (genFlags.next() ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         case "--count", "-n": genCount = genFlags.next().flatMap(Int.init) ?? 16
+        case "--slots": genSlots = genFlags.next().flatMap(Int.init) ?? 8
         case "--stop": genStop = (genFlags.next() ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         default: break
@@ -665,7 +680,7 @@ case "generate":
             "usage: godwit generate --model <dir> --tokens 1,2,3 [--count N]\n".utf8))
         exit(2)
     }
-    runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop))
+    runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots)
 case "logits":
     var logitsModel: String?
     var logitsTokens: [Int] = []

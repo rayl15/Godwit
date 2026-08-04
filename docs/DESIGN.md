@@ -210,6 +210,28 @@ of them.
 That also explains why the first three attempts failed: launch overhead, memory
 placement, and the lookup were never the constraint.
 
+## Where decode time actually goes
+
+Measured over 40 generated tokens at 1.21 tok/s, eight expert slots:
+
+| | Time | Share |
+| --- | ---: | ---: |
+| Expert reads (40.4 GiB at 5.08 GiB/s) | 8.0 s | 24% |
+| Expert arithmetic (143G weights at 40 G w/s) | 3.6 s | 11% |
+| **Command-buffer round trips** | **21.5 s** | **65%** |
+
+Neither I/O nor arithmetic dominates. `ExpertRunner.apply` submits its own
+command buffer and blocks on it — three encoders, commit, `waitUntilCompleted`
+— once per expert. That is **144 full CPU-GPU round trips per token**, at
+roughly 5.7 ms each.
+
+Batching a layer's experts into one command buffer, and ideally the whole
+layer's work, is now worth more than any further work on reads or kernels.
+
+The feasibility estimate assumed reads were the constraint. They were, in the
+model; they are not, in this implementation, because the implementation spends
+two thirds of its time waiting on submissions the model never accounted for.
+
 ## Numerical precision
 
 Activations are FP16 throughout: q, k, v, the attention output, and the residual

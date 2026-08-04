@@ -46,14 +46,14 @@ is", with " a", ":" and " London" behind it.
 Verified against NumPy references at every level: MXFP4 decode, expert
 feed-forward, attention with sinks, and a complete layer including routing.
 
-**Decode is linear now**, at roughly 0.9 tok/s on an M4 Air, flat across the
-generation rather than degrading. Prefill runs about 1.7 tok/s.
+**Decode is linear**, at 1.21 tok/s on an M4 Air with an eight-slot expert
+cache, flat across the generation rather than degrading. Prefill runs about
+1.6 tok/s.
 
-That is well short of the ~5 tok/s the feasibility work projected, and the
-reason is known: `ExpertCachePlanner` is written and tested but not yet wired
-into the runtime, so every decode step re-reads all 144 experts from disk —
-about 1.8 GiB per token. The measured hit rate at eight slots is 73.6%, which
-should cut that to roughly 0.5 GiB.
+Still short of the ~5 tok/s projected, and the reason has moved. Reads are now
+24% of decode time and expert arithmetic 11%; **65% is command-buffer round
+trips** — each expert submits its own and blocks on it, 144 times per token.
+Batching those is the next piece of work.
 
 There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
 `o200k_harmony`, which matches the model's vocabulary exactly.
