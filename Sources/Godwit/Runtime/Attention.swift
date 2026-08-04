@@ -70,7 +70,7 @@ public struct Attention {
     /// one token and its absolute position.
     public func forward(
         hidden: [Float16], tokenCount: Int, positionBase: Int,
-        weights: Weights, layer: Int
+        weights: Weights, layer: Int, cache: KVCache
     ) throws -> [Float16] {
         let heads = spec.attentionHeads
         let kvHeads = spec.keyValueHeads
@@ -100,7 +100,13 @@ public struct Attention {
         try applyRoPE(k, tokens: tokenCount, heads: kvHeads,
                       cosines: cosBuffer, sines: sinBuffer)
 
-        // Attend.
+        // Append this run's keys and values, then attend over everything the
+        // cache holds. This is what makes decode linear: the previous tokens'
+        // projections are already there and are never recomputed.
+        try cache.write(keys: k, values: v, layer: layer,
+                        position: positionBase, tokenCount: tokenCount)
+        let layerCache = cache.layers[layer]
+
         let attended = try context.emptyBuffer(of: Float16.self, count: tokenCount * qWidth)
         let pipeline = try context.pipeline(shader: "attention", function: "gqa_attention_sinks",
                                             constants: [0: spec.headDimension])
@@ -108,7 +114,7 @@ public struct Attention {
               let encoder = commands.makeComputeCommandEncoder()
         else { throw MetalError.encoderCreationFailed }
 
-        var keyCount = UInt32(tokenCount)
+        var keyCount = UInt32(positionBase + tokenCount)
         var headCount = UInt32(heads)
         var kvCount = UInt32(kvHeads)
         var window = UInt32(spec.layers[layer].attention == .sliding
@@ -118,8 +124,8 @@ public struct Attention {
 
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(q, offset: 0, index: 0)
-        encoder.setBuffer(k, offset: 0, index: 1)
-        encoder.setBuffer(v, offset: 0, index: 2)
+        encoder.setBuffer(layerCache.keys, offset: 0, index: 1)
+        encoder.setBuffer(layerCache.values, offset: 0, index: 2)
         encoder.setBuffer(weights.sinks, offset: 0, index: 3)
         encoder.setBuffer(attended, offset: 0, index: 4)
         encoder.setBytes(&keyCount, length: 4, index: 5)
@@ -128,7 +134,7 @@ public struct Attention {
         encoder.setBytes(&window, length: 4, index: 8)
         encoder.setBytes(&base, length: 4, index: 9)
         encoder.setBytes(&scale, length: 4, index: 10)
-        var ring = UInt32(0)      // standalone path keeps K/V linear
+        var ring = UInt32(layerCache.ring)
         encoder.setBytes(&ring, length: 4, index: 11)
         encoder.dispatchThreadgroups(
             MTLSize(width: tokenCount, height: heads, depth: 1),

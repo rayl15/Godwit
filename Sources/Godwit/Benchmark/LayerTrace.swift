@@ -110,13 +110,16 @@ public struct LayerTrace {
         var stream = try initialHidden(tokenCount: tokenCount)
         var routing: [[[Int]]] = []
         let started = Date()
+        let cache = try KVCache(context: context, spec: spec,
+                                maxContext: max(tokenCount, 128), layerCount: layerCount)
 
         for index in 0..<layerCount {
             let layer = TransformerLayer(context: context, reader: reader,
                                          index: index, rope: rope)
             let weights = try layer.loadWeights()
             let (next, trace) = try layer.forward(
-                hidden: stream, tokenCount: tokenCount, positionBase: 0, weights: weights)
+                hidden: stream, tokenCount: tokenCount, positionBase: 0,
+                weights: weights, cache: cache)
             stream = next
             routing.append(trace.routing.map(\.experts))
         }

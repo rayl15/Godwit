@@ -65,7 +65,7 @@ public struct TransformerLayer {
     /// returned updated.
     public func forward(
         hidden: [Float16], tokenCount: Int, positionBase: Int,
-        weights: Weights, cache: KVCache? = nil
+        weights: Weights, cache: KVCache
     ) throws -> (hidden: [Float16], trace: Trace) {
         let width = spec.hiddenSize
         var stream = hidden
@@ -74,7 +74,8 @@ public struct TransformerLayer {
         var normed = try normalise(stream, tokenCount: tokenCount, weight: weights.inputNorm)
         let attended = try attention.forward(hidden: normed, tokenCount: tokenCount,
                                              positionBase: positionBase,
-                                             weights: weights.attention, layer: index)
+                                             weights: weights.attention, layer: index,
+                                             cache: cache)
         for i in 0..<(tokenCount * width) {
             stream[i] = Float16(Float(stream[i]) + Float(attended[i]))
         }
@@ -115,7 +116,6 @@ public struct TransformerLayer {
             }
         }
 
-        _ = cache
         return (stream, Trace(routing: decisions))
     }
 

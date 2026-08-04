@@ -98,8 +98,10 @@ func runLogits(model: String, tokens: [Int], topK: Int) {
         FileHandle.standardError.write(Data(String(
             format: "loaded in %.1fs\n", Date().timeIntervalSince(loadStart)).utf8))
 
+        let cache = try runner.makeCache(maxContext: tokens.count + 16)
         let started = Date()
-        let logits = try runner.logits(tokens: tokens, weights: weights) { done, total in
+        let logits = try runner.logits(tokens: tokens, cache: cache,
+                                       weights: weights) { done, total in
             FileHandle.standardError.write(Data("\rlayer \(done)/\(total)".utf8))
         }
         FileHandle.standardError.write(Data("\n".utf8))
@@ -125,31 +127,43 @@ func runLogits(model: String, tokens: [Int], topK: Int) {
     }
 }
 
-func runGenerate(model: String, tokens: [Int], count: Int) {
+func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = []) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
         let runner = ModelRunner(context: context, reader: reader)
         let weights = try runner.loadWeights()
 
-        var sequence = tokens
+        let cache = try runner.makeCache(maxContext: tokens.count + count + 16)
         var produced: [Int] = []
-        let started = Date()
 
+        // Prefill: the whole prompt in one pass, filling the cache.
+        let prefillStart = Date()
+        var logits = try runner.logits(tokens: tokens, positionBase: 0,
+                                       cache: cache, weights: weights)
+        let prefill = Date().timeIntervalSince(prefillStart)
+        FileHandle.standardError.write(Data(String(
+            format: "prefill %d tokens in %.2fs (%.1f tok/s)\n",
+            tokens.count, prefill, Double(tokens.count) / prefill).utf8))
+
+        // Decode: one token at a time against the cache.
+        let decodeStart = Date()
         for step in 0..<count {
-            // No KV reuse yet: every step re-runs the whole prompt. Correct, and
-            // quadratic — the cache is what makes this practical, and wiring it
-            // through is the next piece of work.
-            let logits = try runner.logits(tokens: sequence, weights: weights)
             var best = 0
             for index in logits.indices where logits[index] > logits[best] { best = index }
-            sequence.append(best)
             produced.append(best)
-            let rate = Double(step + 1) / Date().timeIntervalSince(started)
+            if stop.contains(best) { break }
+            if step == count - 1 { break }
+            logits = try runner.logits(tokens: [best], positionBase: cache.length,
+                                       cache: cache, weights: weights)
+            let rate = Double(step + 1) / Date().timeIntervalSince(decodeStart)
             FileHandle.standardError.write(Data(String(
-                format: "\rgenerated %d/%d  (%.2f tok/s)", step + 1, count, rate).utf8))
+                format: "\rdecode %d/%d  (%.2f tok/s)", step + 1, count, rate).utf8))
         }
-        FileHandle.standardError.write(Data("\n".utf8))
+        let decode = Date().timeIntervalSince(decodeStart)
+        FileHandle.standardError.write(Data(String(
+            format: "\ndecode %d tokens in %.2fs (%.2f tok/s)\n",
+            count, decode, Double(count) / decode).utf8))
 
         print(produced.map(String.init).joined(separator: ","))
     } catch {
@@ -324,8 +338,11 @@ func runAttentionCheck(model: String, reference: String) {
 
         let weights = try Attention.loadWeights(reader: reader, layer: layer,
                                                 device: context.device)
+        let cache = try KVCache(context: context, spec: reader.manifest.spec,
+                                maxContext: max(tokens, 128), layerCount: layer + 1)
         let produced = try attention.forward(hidden: hidden, tokenCount: tokens,
-                                             positionBase: 0, weights: weights, layer: layer)
+                                             positionBase: 0, weights: weights,
+                                             layer: layer, cache: cache)
 
         // The output distribution has a long tail -- the largest element is
         // ~40x the mean -- so normalising by the mean inflates errors on big
@@ -399,9 +416,15 @@ func runLayerCheck(model: String, reference: String) {
         let layer = TransformerLayer(context: context, reader: reader,
                                      index: layerIndex, rope: rope)
         let weights = try layer.loadWeights()
+        // A fresh cache, so attending over it is equivalent to attending within
+        // the batch — which keeps this a valid regression test against the
+        // reference generated before the cache existed.
+        let cache = try KVCache(context: context, spec: reader.manifest.spec,
+                                maxContext: max(tokens, 128), layerCount: layerIndex + 1)
         let started = Date()
         let (produced, trace) = try layer.forward(
-            hidden: hidden, tokenCount: tokens, positionBase: 0, weights: weights)
+            hidden: hidden, tokenCount: tokens, positionBase: 0,
+            weights: weights, cache: cache)
         let elapsed = Date().timeIntervalSince(started)
 
         // Routing must match exactly. It is a discrete choice, so any drift
@@ -624,6 +647,7 @@ case "generate":
     var genModel: String?
     var genTokens: [Int] = []
     var genCount = 16
+    var genStop: [Int] = []
     var genFlags = arguments.dropFirst().makeIterator()
     while let flag = genFlags.next() {
         switch flag {
@@ -631,6 +655,8 @@ case "generate":
         case "--tokens": genTokens = (genFlags.next() ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         case "--count", "-n": genCount = genFlags.next().flatMap(Int.init) ?? 16
+        case "--stop": genStop = (genFlags.next() ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         default: break
         }
     }
@@ -639,7 +665,7 @@ case "generate":
             "usage: godwit generate --model <dir> --tokens 1,2,3 [--count N]\n".utf8))
         exit(2)
     }
-    runGenerate(model: genModel, tokens: genTokens, count: genCount)
+    runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop))
 case "logits":
     var logitsModel: String?
     var logitsTokens: [Int] = []

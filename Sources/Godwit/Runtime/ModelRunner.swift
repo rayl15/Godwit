@@ -59,13 +59,24 @@ public struct ModelRunner {
             headShape: try reader.trunkShape("head"))
     }
 
+    /// Allocates a KV cache sized for `maxContext` tokens.
+    public func makeCache(maxContext: Int) throws -> KVCache {
+        try KVCache(context: context, spec: spec, maxContext: maxContext,
+                    layerCount: reader.manifest.layerCount)
+    }
+
     /// Runs a token sequence and returns logits for the final position.
+    ///
+    /// `positionBase` is where this run sits in the conversation, so a prompt
+    /// passes 0 and each subsequent decode step passes the length so far. The
+    /// cache holds every previous token's keys and values, which is what keeps
+    /// decode linear rather than re-running the whole sequence per token.
     ///
     /// Only the last position's logits are produced: during generation the
     /// earlier ones are never read, and the head is a 201,088-row projection
     /// that is not worth computing for rows nobody looks at.
     public func logits(
-        tokens: [Int], weights: Weights,
+        tokens: [Int], positionBase: Int = 0, cache: KVCache, weights: Weights,
         progress: (Int, Int) -> Void = { _, _ in }
     ) throws -> [Float] {
         precondition(!tokens.isEmpty, "need at least one token")
@@ -73,11 +84,12 @@ public struct ModelRunner {
 
         for (index, layer) in layers.enumerated() {
             let (next, _) = try layer.forward(
-                hidden: stream, tokenCount: tokens.count, positionBase: 0,
-                weights: weights.layers[index])
+                hidden: stream, tokenCount: tokens.count, positionBase: positionBase,
+                weights: weights.layers[index], cache: cache)
             stream = next
             progress(index + 1, layers.count)
         }
+        cache.advance(by: tokens.count)
 
         // Only the last row matters from here on.
         let width = spec.hiddenSize

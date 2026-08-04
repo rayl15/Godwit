@@ -63,11 +63,12 @@ kernel void gqa_attention_sinks(
     float runningMax = -INFINITY;
     float denominator = 0.0f;
 
-    for (uint key = 0; key <= position && key < keyCount; ++key) {
-        // (keyCount is the number of positions written so far, not slots)
-        // Sliding layers see only the most recent `window` keys, inclusive of
-        // the query's own position.
-        if (window != 0 && position - key >= window) { continue; }
+    // Sliding layers see only the most recent `window` keys, so start there
+    // rather than walking from zero and skipping. At a long context that is the
+    // difference between O(context) and O(window) per query.
+    const uint firstKey = (window != 0 && position >= window) ? (position - window + 1u) : 0u;
+
+    for (uint key = firstKey; key <= position && key < keyCount; ++key) {
 
         // Sliding layers store K/V in a ring: a window of 128 needs 128 slots,
         // not one per position, which is what keeps KV bounded at long context.

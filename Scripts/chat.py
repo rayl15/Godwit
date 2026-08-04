@@ -35,9 +35,14 @@ else:
 
 print(f"prompt ({len(ids)} tokens): {prompt!r}", flush=True)
 
+# <|return|> ends an assistant turn; <|end|> closes a message. Without these
+# the model keeps going and starts a fresh turn on its own.
+stop = [special["<|return|>"], special["<|endoftext|>"]]
+
 result = subprocess.run(
     [".build/release/godwit", "generate", "--model", model,
-     "--tokens", ",".join(map(str, ids)), "--count", str(count)],
+     "--tokens", ",".join(map(str, ids)), "--count", str(count),
+     "--stop", ",".join(map(str, stop))],
     capture_output=True, text=True)
 if result.returncode != 0:
     sys.exit(result.stderr)

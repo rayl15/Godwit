@@ -36,7 +36,8 @@ streaming experts from disk.
 $ python3 Scripts/chat.py model.gwt "What is the capital of France?"
 
 <|channel|>analysis<|message|>The user asks: "What is the capital of France?"
-This is a straightforward factual question. The answer
+This is a straightforward factual question. The answer: Paris.<|end|>
+<|start|>assistant<|channel|>final<|message|>The capital of France is **Paris**.<|return|>
 ```
 
 On a raw completion the model puts 58.2% on " Paris" for "The capital of France
@@ -45,10 +46,14 @@ is", with " a", ":" and " London" behind it.
 Verified against NumPy references at every level: MXFP4 decode, expert
 feed-forward, attention with sinks, and a complete layer including routing.
 
-**Not yet usable.** There is no KV cache reuse between steps, so each token
-re-runs the entire sequence and generation is quadratic — fine for a handful of
-tokens, impractical past about twenty. That is the next piece of work and it is
-the only thing between this and a usable tool.
+**Decode is linear now**, at roughly 0.9 tok/s on an M4 Air, flat across the
+generation rather than degrading. Prefill runs about 1.7 tok/s.
+
+That is well short of the ~5 tok/s the feasibility work projected, and the
+reason is known: `ExpertCachePlanner` is written and tested but not yet wired
+into the runtime, so every decode step re-reads all 144 experts from disk —
+about 1.8 GiB per token. The measured hit rate at eight slots is 73.6%, which
+should cut that to roughly 0.5 GiB.
 
 There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
 `o200k_harmony`, which matches the model's vocabulary exactly.
