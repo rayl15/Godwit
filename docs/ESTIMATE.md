@@ -42,15 +42,43 @@ accounting.
 
 `config.json` excludes attention, router, embeddings, and head from MXFP4 — they
 ship as bf16, which would put the resident trunk at ~4.3 GiB. Requantising them
-ourselves is what makes this fit:
+ourselves is what makes this fit.
+
+**Measured, not assumed** (`Scripts/analysis/requant_quality.py`). An earlier
+version of this document planned 4-bit embeddings and head. That does not
+survive contact with the data — OpenAI had a reason to leave these in bf16:
+
+| Tensor | Scheme | SNR | Quality |
+| --- | --- | ---: | --- |
+| Output head | affine int8 | 45.3 dB | **98.4%** top-1 agreement |
+| Output head | affine int4 | 20.7 dB | **81.1%** top-1 agreement |
+| Embeddings | affine int8 | 40.7 dB | cosine 1.0000 |
+| Embeddings | affine int4 | 16.1 dB | cosine 0.9880, worst 0.9811 |
+| Attention q_proj | affine int8 | 43.5 dB | — |
+| Attention q_proj | affine int4 | 18.9 dB | — |
+
+**4-bit is not viable for the head.** Changing the predicted token 19% of the
+time is not a subtle degradation, it is a different model. 4-bit embeddings are
+also marginal — cosine 0.98 means tokens are measurably blurring together.
+
+8-bit throughout costs 0.54 GiB more than the 4-bit plan and stays comfortably
+inside budget:
 
 | Component | Precision | Size |
 | --- | --- | ---: |
-| Embedding | 4-bit | 0.29 GiB |
-| Output head (untied) | 4-bit | 0.29 GiB |
-| Attention | 8-bit | 0.92 GiB |
-| Router | bf16 (precision-sensitive, and tiny) | 0.03 GiB |
-| **Resident trunk** | | **1.52 GiB** |
+| Embedding | 8-bit | 0.57 GiB |
+| Output head (untied) | 8-bit | 0.57 GiB |
+| Attention | 8-bit | 0.95 GiB |
+| Router | bf16 (tiny, and feeds a discrete choice) | 0.03 GiB |
+| **Resident trunk** | | **2.12 GiB** |
+
+If 98.4% top-1 later proves too lossy in practice, the head can stay bf16 for
++0.58 GiB — still affordable.
+
+**Caveat:** top-1 agreement was measured against random unit-norm hidden states,
+not real activations, which have structure this test does not reproduce. It is a
+proxy, and the ranking of the schemes is more trustworthy than the absolute
+percentages.
 
 KV is cheap because the sliding window is only 128 tokens: **0.29 GiB at 8K
 context**, 1.13 GiB at 32K.
@@ -81,14 +109,15 @@ hide reads behind than TurboFieldfare had.
 
 | Slots | Total RAM | I/O time | Compute | tok/s |
 | ---: | ---: | ---: | ---: | ---: |
-| 4 | 3.57 GiB | 301 ms | 27 ms | **3.17** |
-| 6 | 4.46 GiB | 252 ms | 27 ms | **3.76** |
-| 8 | 5.35 GiB | 225 ms | 27 ms | **4.19** |
-| 12 | 7.12 GiB | 191 ms | 27 ms | **4.89** |
-| 16 | 8.89 GiB | 169 ms | 27 ms | **5.48** |
+| 4 | 4.17 GiB | 301 ms | 27 ms | **3.17** |
+| 6 | 5.06 GiB | 252 ms | 27 ms | **3.76** |
+| 8 | 5.95 GiB | 225 ms | 27 ms | **4.19** |
+| 12 | 7.72 GiB | 191 ms | 27 ms | **4.89** |
+| 16 | 9.49 GiB | 169 ms | 27 ms | **5.48** |
 
-8-12 slots is the sweet spot: 5.4-7.1 GiB total leaves real headroom on a 16 GB
-machine, and the returns above 12 slots are thin.
+8-12 slots is the sweet spot: 6.0-7.7 GiB total leaves real headroom on a 16 GB
+machine, and the returns above 12 slots are thin. Throughput is unchanged by the
+8-bit trunk — the extra 0.54 GiB comes out of headroom, not cache slots.
 
 ## Prefill
 

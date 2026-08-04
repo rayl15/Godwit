@@ -16,11 +16,11 @@ model on the same machine is a capability that does not otherwise exist.
 
 | Component | Residency | Rationale |
 | --- | --- | --- |
-| Embeddings / output head | Resident | Touched every token |
+| Embeddings / output head | Resident, 8-bit | Touched every token; 4-bit measurably breaks the head |
 | Attention projections | Resident | Touched every layer, every token |
 | Router | Resident | Must run before we know what to fetch |
 | Norms, scalars | Resident | Negligible |
-| Shared experts | Resident | Unconditional, and useful GPU work to overlap against I/O |
+| Shared experts | Resident where present | Useful GPU work to overlap reads against — but **GPT-OSS has none** |
 | **Routed experts** | **Streamed** | Bulk of the checkpoint, sparsely used |
 | KV cache | Resident | Grows with context; bounded for sliding-window layers |
 
@@ -30,13 +30,18 @@ model on the same machine is a capability that does not otherwise exist.
 for each layer:
     attention + router          (GPU, resident weights)
     plan top-k against cache    (CPU, pure)
-    dispatch shared expert      (GPU) ─┐ overlapped
+    dispatch cached experts     (GPU) ─┐ overlapped
     fetch missing experts       (CPU) ─┘
-    combine shared + routed     (GPU)
+    combine routed outputs      (GPU)
 ```
 
-The overlap is deliberately coarse: one shared-expert dispatch against one batch
-of reads. Finer-grained schemes are covered under inherited findings below.
+Overlap is deliberately coarse: one dispatch against one batch of reads.
+Finer-grained schemes are covered under inherited findings below.
+
+TurboFieldfare overlapped reads against its resident shared-expert branch.
+**GPT-OSS has no shared expert**, so the only work available to hide reads
+behind is the experts already in cache — which is exactly the work that shrinks
+as the cache does. What else can fill the read window is an open problem.
 
 ## Inherited findings
 
@@ -109,10 +114,13 @@ Two consequences carry into the design:
 
 ### 3. Does external Thunderbolt NVMe hold up?
 
-Internal Apple NVMe does ~5 GB/s; a good TB4 enclosure does ~3 GB/s with higher
-latency. Since reads are the bottleneck, this directly scales throughput.
-Needs measuring, not assuming — and it decides whether the project is usable by
-people without large internal disks.
+Internal Apple NVMe measured 5.08 GiB/s at 8 threads; a good TB4 enclosure does
+~3 GB/s with higher latency. Since reads are the bottleneck, this scales
+throughput directly.
+
+Not on the critical path for development — the checkpoint fits internally — but
+it decides whether people without large internal disks can use the result, so it
+still needs measuring rather than assuming.
 
 ### 4. How much does unified memory carry us?
 
