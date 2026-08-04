@@ -17,9 +17,12 @@ public final class ChatServer {
     private let system: String
     private let turnLock = NSLock()
 
+    private let directory: URL
+
     public init(directory: URL, slots: Int = 8, settings: Sampler.Settings = Sampler.Settings(),
                 maxTokens: Int = 1024,
                 system: String = "You are a helpful assistant.") throws {
+        self.directory = directory
         self.context = try MetalContext()
         self.reader = try ModelReader(directory: directory)
         self.tokenizer = try reader.loadTokenizer()
@@ -48,6 +51,13 @@ public final class ChatServer {
             switch request.path {
             case "/":
                 return .ok(contentType: "text/html; charset=utf-8", body: Data(page.utf8))
+            case "/api/atlas":
+                // Optional: the dashboard shows a hint when it is absent.
+                let path = directory.appendingPathComponent("atlas.json")
+                guard let data = try? Data(contentsOf: path) else {
+                    return .json("{\"points\":[]}")
+                }
+                return .ok(contentType: "application/json", body: data)
             case "/api/chat":
                 guard let question = request.query["q"], !question.isEmpty else {
                     return .json("{\"error\":\"missing q\"}")

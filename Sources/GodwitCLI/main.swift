@@ -337,6 +337,43 @@ func runServe(model: String, port: UInt16, slots: Int,
     }
 }
 
+func runAtlas(model: String, output: String, slots: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let atlas = ExpertAtlas(context: context, reader: reader)
+
+        FileHandle.standardError.write(Data("probing the router...\n".utf8))
+        let started = Date()
+        let result = try atlas.build(slots: slots) { topic, done, total in
+            FileHandle.standardError.write(Data(String(
+                format: "  %2d/%2d  %@\n", done, total, topic as NSString).utf8))
+        }
+
+        let encoder = JSONEncoder()
+        try encoder.encode(result).write(to: URL(fileURLWithPath: output))
+
+        let specialists = result.points.filter { $0.specialisation > 0.35 }
+        var byTopic: [String: Int] = [:]
+        for point in specialists { byTopic[point.topic, default: 0] += 1 }
+
+        print(String(format: "\n%d experts characterised in %.1f min",
+                     result.points.count, Date().timeIntervalSince(started) / 60))
+        print(String(format: "axes explain %.0f%% / %.0f%% / %.0f%% of variance",
+                     (result.variance.first ?? 0) * 100,
+                     result.variance.count > 1 ? result.variance[1] * 100 : 0,
+                     result.variance.count > 2 ? result.variance[2] * 100 : 0))
+        print("\n\(specialists.count) specialists (concentration > 0.35):")
+        for (topic, count) in byTopic.sorted(by: { $0.value > $1.value }) {
+            print(String(format: "  %-10@ %4d", topic as NSString, count))
+        }
+        print("\nwritten to \(output)")
+    } catch {
+        FileHandle.standardError.write(Data("atlas failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 func runExpertVerification(directory: String) {
     do {
         let context = try MetalContext()
@@ -840,6 +877,25 @@ case "generate":
     }
     runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
                 profile: genProfile, pageCache: genPageCache)
+case "atlas":
+    var atlasModel: String?
+    var atlasOut = "atlas.json"
+    var atlasSlots = 8
+    var atlasFlags = arguments.dropFirst().makeIterator()
+    while let flag = atlasFlags.next() {
+        switch flag {
+        case "--model", "-m": atlasModel = atlasFlags.next()
+        case "--output", "-o": atlasOut = atlasFlags.next() ?? "atlas.json"
+        case "--slots": atlasSlots = atlasFlags.next().flatMap(Int.init) ?? 8
+        default: break
+        }
+    }
+    guard let atlasModel else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit atlas --model <dir> [--output atlas.json]\n".utf8))
+        exit(2)
+    }
+    runAtlas(model: atlasModel, output: atlasOut, slots: atlasSlots)
 case "serve":
     var serveModel: String?
     var servePort: UInt16 = 8080
@@ -958,6 +1014,7 @@ case nil:
     commands:
       chat             talk to the model (interactive, or --prompt for one shot)
       serve            web dashboard with live expert routing on 127.0.0.1
+      atlas            probe the router to measure what each expert specialises in
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights

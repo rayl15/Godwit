@@ -102,6 +102,15 @@ enum WebUI {
         .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 5px;
                   vertical-align: -1px; }
         .empty { color: var(--faint); text-align: center; margin-top: 80px; }
+        #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
+               background: #08090b; border: 1px solid var(--line); }
+        #sky:active { cursor: grabbing; }
+        #atlas-legend { flex-wrap: wrap; gap: 10px 16px; }
+        #atlas-legend span { display: flex; align-items: center; gap: 5px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        #tip { position: fixed; pointer-events: none; background: var(--panel);
+               border: 1px solid var(--line); padding: 6px 9px; font-size: 11px;
+               display: none; z-index: 10; white-space: pre; }
         </style>
         </head>
         <body>
@@ -157,6 +166,7 @@ enum WebUI {
             <div class="tabs">
               <button class="tab on" data-view="chat">Chat</button>
               <button class="tab" data-view="experts">Experts</button>
+              <button class="tab" data-view="atlas">Atlas</button>
             </div>
             <div class="pill">
               <span>status <b id="status">idle</b></span>
@@ -176,6 +186,15 @@ enum WebUI {
             <div class="axis"><span>layer 0</span><span>layer \(layers - 1)</span></div>
           </div>
 
+          <div class="view" id="v-atlas">
+            <div class="legend" id="atlas-legend"></div>
+            <canvas id="sky"></canvas>
+            <div class="axis">
+              <span id="atlas-note">loading…</span>
+              <span>drag to spin · scroll to zoom</span>
+            </div>
+          </div>
+
           <footer>
             <div class="composer">
               <textarea id="input" placeholder="Ask something…"></textarea>
@@ -193,6 +212,9 @@ enum WebUI {
           document.querySelectorAll('.view').forEach(x => x.classList.remove('on'));
           t.classList.add('on');
           $('v-' + t.dataset.view).classList.add('on');
+          // The canvas has zero size while its tab is hidden, so anything drawn
+          // before it is shown goes nowhere. Redraw on activation.
+          if (t.dataset.view === 'atlas' && typeof drawAtlas === 'function') drawAtlas();
         });
 
         // 36 x 128 cells. Built once and mutated by class, never rebuilt —
@@ -294,11 +316,157 @@ enum WebUI {
           };
         }
 
+
+        // ---- Atlas: experts placed by measured routing affinity ----
+        // Colours are categorical and deliberately distinguishable on black;
+        // they carry meaning (topic), so they must not be a gradient.
+        const TOPIC_COLOURS = {
+          python:'#4a9eda', sql:'#5ec8c8', math:'#d98b4a', poetry:'#d95a9e',
+          legal:'#b07fd9', medical:'#6dc46d', chinese:'#e05c5c', japanese:'#e8a13c',
+          russian:'#8fa8d9', json:'#c8c85e', chat:'#9b9b9b', history:'#c07a4a'
+        };
+        let atlas = null, spin = { x: -0.28, y: 0.7 }, zoom = 1.7, dragging = null;
+        const sky = document.getElementById('sky');
+        const tip = document.getElementById('tip');
+
+        function project(p, w, h) {
+          const cy = Math.cos(spin.y), sy = Math.sin(spin.y);
+          const cx = Math.cos(spin.x), sx = Math.sin(spin.x);
+          // Centre on the cloud, not the origin: the generalist core sits well
+          // off zero and would otherwise push everything into a corner.
+          const px = p.x - atlas.centre.x, py = p.y - atlas.centre.y,
+                pz = p.z - atlas.centre.z;
+          let x = px * cy - pz * sy;
+          let z = px * sy + pz * cy;
+          let y = py * cx - z * sx;
+          z = py * sx + z * cx;
+          const scale = Math.min(w, h) * 0.40 * zoom / (atlas.spread || 1);
+          const depth = 1 / (1 + z * 0.35 / (atlas.spread || 1));
+          return { sx: w / 2 + x * scale * depth, sy: h / 2 + y * scale * depth,
+                   depth: depth, z: z };
+        }
+
+        function drawAtlas() {
+          if (!atlas) return;
+          const dpr = window.devicePixelRatio || 1;
+          const w = sky.clientWidth, h = sky.clientHeight;
+          sky.width = w * dpr; sky.height = h * dpr;
+          const g = sky.getContext('2d');
+          g.scale(dpr, dpr);
+          g.fillStyle = '#08090b'; g.fillRect(0, 0, w, h);
+
+          // Far points first so near ones sit on top.
+          const drawn = atlas.points.map(p => ({ p: p, v: project(p, w, h) }))
+                                   .sort((a, b) => b.v.z - a.v.z);
+          for (const d of drawn) {
+            const spec = d.p.specialisation;
+            const size = (0.7 + spec * 2.6) * d.v.depth * zoom;
+            g.globalAlpha = 0.25 + spec * 0.75;
+            g.fillStyle = TOPIC_COLOURS[d.p.topic] || '#777';
+            g.beginPath();
+            g.arc(d.v.sx, d.v.sy, Math.max(0.5, size), 0, 6.2832);
+            g.fill();
+          }
+
+          // Topic labels at the centroid of each cluster's specialists.
+          g.globalAlpha = 1;
+          g.font = '11px ui-monospace, Menlo, monospace';
+          for (const topic of atlas.topics) {
+            const members = atlas.points.filter(p => p.topic === topic
+                                                    && p.specialisation > 0.45);
+            if (members.length < 12) continue;
+            let cx = 0, cy = 0, cz = 0;
+            for (const m of members) { cx += m.x; cy += m.y; cz += m.z; }
+            const v = project({ x: cx / members.length, y: cy / members.length,
+                                z: cz / members.length }, w, h);
+            // A dark plate behind the label: the clusters overlap near the
+            // core and bare text on top of points is unreadable.
+            const width = g.measureText(topic).width;
+            g.fillStyle = 'rgba(8,9,11,0.82)';
+            g.fillRect(v.sx + 4, v.sy - 14, width + 6, 15);
+            g.fillStyle = TOPIC_COLOURS[topic] || '#aaa';
+            g.fillText(topic, v.sx + 7, v.sy - 3);
+            g.beginPath(); g.arc(v.sx, v.sy, 2.5, 0, 6.2832); g.fill();
+          }
+        }
+
+        sky.addEventListener('mousedown', e => {
+          dragging = { x: e.clientX, y: e.clientY, sx: spin.x, sy: spin.y };
+        });
+        window.addEventListener('mouseup', () => dragging = null);
+        window.addEventListener('mousemove', e => {
+          if (!dragging) return;
+          spin.y = dragging.sy + (e.clientX - dragging.x) * 0.006;
+          spin.x = dragging.sx + (e.clientY - dragging.y) * 0.006;
+          drawAtlas();
+        });
+        sky.addEventListener('wheel', e => {
+          e.preventDefault();
+          zoom = Math.max(0.4, Math.min(6, zoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+          drawAtlas();
+        }, { passive: false });
+
+        sky.addEventListener('mousemove', e => {
+          if (!atlas || dragging) { tip.style.display = 'none'; return; }
+          const rect = sky.getBoundingClientRect();
+          const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+          let best = null, bestDist = 64;
+          for (const p of atlas.points) {
+            const v = project(p, sky.clientWidth, sky.clientHeight);
+            const d = (v.sx - mx) ** 2 + (v.sy - my) ** 2;
+            if (d < bestDist) { bestDist = d; best = p; }
+          }
+          if (!best) { tip.style.display = 'none'; return; }
+          tip.textContent = 'layer ' + best.layer + ' · expert ' + best.expert
+            + '\\n' + best.topic + '  ' + (best.specialisation * 100).toFixed(0)
+            + '% concentrated\\n' + best.activations + ' activations';
+          tip.style.display = 'block';
+          tip.style.left = (e.clientX + 14) + 'px';
+          tip.style.top = (e.clientY + 14) + 'px';
+        });
+        sky.addEventListener('mouseleave', () => tip.style.display = 'none');
+
+        fetch('/api/atlas').then(r => r.ok ? r.json() : null).then(data => {
+          const note = document.getElementById('atlas-note');
+          if (!data || !data.points || !data.points.length) {
+            note.textContent = 'no atlas — run: godwit atlas --model <dir> -o atlas.json';
+            return;
+          }
+          atlas = data;
+          let cx = 0, cy = 0, cz = 0;
+          for (const p of data.points) { cx += p.x; cy += p.y; cz += p.z; }
+          const n = data.points.length;
+          atlas.centre = { x: cx / n, y: cy / n, z: cz / n };
+          let spread = 0;
+          for (const p of data.points) {
+            spread = Math.max(spread, Math.abs(p.x - atlas.centre.x),
+                              Math.abs(p.y - atlas.centre.y),
+                              Math.abs(p.z - atlas.centre.z));
+          }
+          atlas.spread = spread || 1;
+
+          const legend = document.getElementById('atlas-legend');
+          for (const topic of data.topics) {
+            const n = data.points.filter(p => p.topic === topic
+                                              && p.specialisation > 0.35).length;
+            const el = document.createElement('span');
+            el.innerHTML = '<i class="dot" style="background:'
+              + (TOPIC_COLOURS[topic] || '#777') + '"></i>' + topic + ' ' + n;
+            legend.appendChild(el);
+          }
+          const v = data.variance || [];
+          note.textContent = data.points.length + ' experts · axes explain '
+            + v.map(x => (x * 100).toFixed(0) + '%').join(' / ') + ' of variance';
+          drawAtlas();
+        });
+        window.addEventListener('resize', drawAtlas);
+
         $('send').onclick = ask;
         $('input').addEventListener('keydown', e => {
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
         });
         </script>
+        <div id="tip"></div>
         </body>
         </html>
         """
