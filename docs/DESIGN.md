@@ -96,12 +96,19 @@ points at threadgroup count rather than arithmetic.
 That is the same wall TurboFieldfare hit, and persistent workgroups took their
 routed phase from 239 to 60 ms. Applying that here is the next kernel task, and
 there is a large amount of headroom to claim.
+>
+> **Later:** persistent workgroups turned out to be worth only ~2%. The win came
+> from processing four rows per SIMD group (+18%), because the kernel was
+> latency-bound rather than launch-bound. See "Kernel findings" below.
 
 ### 2. What is the real ceiling at a 30:1 stream-to-resident ratio? — ANSWERED
 
-**Decode 3-5 tok/s; prefill costs a full pass over the routed pool per chunk.**
-Worked through in [ESTIMATE.md](ESTIMATE.md) against measured NVMe bandwidth and
-a hit-rate simulation calibrated to TurboFieldfare's published numbers.
+**Measured: 1.4-1.5 tok/s on this machine.** The pre-build estimate in
+[ESTIMATE.md](ESTIMATE.md) said 3-5, and was wrong because the bandwidth
+benchmark it rested on was contaminated by the page cache. Reads run at ~2 GiB/s
+here and the runtime is at device speed; a Mac with a larger, faster SSD should
+reach the original range. Prefill costs a full pass over the routed pool per
+chunk. See [RESULTS.md](RESULTS.md).
 
 Two consequences carry into the design:
 

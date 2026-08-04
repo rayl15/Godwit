@@ -1,11 +1,21 @@
 # Feasibility estimate: GPT-OSS-120B on a 16 GB M4
 
+> **Historical.** This is the estimate made *before* the runtime existed, kept
+> because the reasoning is worth reading and because most of it was wrong in
+> instructive ways. For what the finished engine actually does, see
+> [RESULTS.md](RESULTS.md).
+>
+> The headline number here — 5 tok/s, rising to 10 with better kernels — did not
+> survive. The measured figure is **1.4-1.5 tok/s**, and the reason is a
+> bandwidth benchmark on this page that was contaminated by the page cache. The
+> correction is recorded in place below rather than edited away.
+
 Answers open question #2 in [DESIGN.md](DESIGN.md): what throughput does a 30:1
 stream-to-resident ratio actually produce?
 
-**Verdict: decode is viable at ~5 tok/s today and ~10 with better kernels. Prefill costs a full pass over the
-routed pool per chunk, which makes chunk size the single most important
-parameter in the system.**
+**Verdict at the time: decode is viable at ~5 tok/s.** Prefill costs a full pass
+over the routed pool per chunk, which makes chunk size the single most important
+parameter in the system.
 
 Done before writing kernels, deliberately — the answer could have killed the
 project and it cost an afternoon.
