@@ -110,14 +110,14 @@ public struct ModelRunner {
     }
 
     /// Dequantises embedding rows for a token sequence.
-    private func embed(tokens: [Int], weights: Weights) throws -> [Float16] {
+    private func embed(tokens: [Int], weights: Weights) throws -> [Float] {
         let width = spec.hiddenSize
         let rows = weights.embedShape[0]
         let groups = width / Int8Affine.groupSize
         let base = weights.embed.contents()
         let meta = base.advanced(by: rows * width)
 
-        var out = [Float16](repeating: 0, count: tokens.count * width)
+        var out = [Float](repeating: 0, count: tokens.count * width)
         for (position, token) in tokens.enumerated() {
             precondition(token >= 0 && token < rows, "token \(token) out of range")
             let codeRow = base.advanced(by: token * width)
@@ -129,21 +129,21 @@ public struct ModelRunner {
                 let zero = BFloat16.toFloat(metaRow[group * 2 + 1])
                 for i in 0..<Int8Affine.groupSize {
                     let index = group * Int8Affine.groupSize + i
-                    out[position * width + index] = Float16(Float(codeRow[index]) * scale + zero)
+                    out[position * width + index] = Float(codeRow[index]) * scale + zero
                 }
             }
         }
         return out
     }
 
-    private func normalise(_ values: [Float16], weight: MTLBuffer) throws -> [Float16] {
+    private func normalise(_ values: [Float], weight: MTLBuffer) throws -> [Float16] {
         let width = spec.hiddenSize
         let weights = weight.contents().bindMemory(to: UInt16.self, capacity: width)
         var sumSquares: Float = 0
-        for value in values { sumSquares += Float(value) * Float(value) }
+        for value in values { sumSquares += value * value }
         let inverse = 1 / (sumSquares / Float(width) + spec.rmsNormEpsilon).squareRoot()
         return (0..<width).map {
-            Float16(Float(values[$0]) * inverse * BFloat16.toFloat(weights[$0]))
+            Float16(values[$0] * inverse * BFloat16.toFloat(weights[$0]))
         }
     }
 

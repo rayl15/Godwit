@@ -29,35 +29,31 @@ the model at all. The bet is that "slow" beats "impossible."
 
 ## Status
 
-**It generates text.** The full 58.93 GiB model runs on a 16 GB M4 Air,
-streaming experts from disk.
+**Working, self-contained, and slow.** The full 58.93 GiB model runs on a 16 GB
+M4 Air, streaming experts from disk. No Python.
 
 ```
-$ python3 Scripts/chat.py model.gwt "What is the capital of France?"
+$ godwit chat --model model.gwt
+> What is 17 times 23?
+\(17 \times 23 = 391\)
 
-<|channel|>analysis<|message|>The user asks: "What is the capital of France?"
-This is a straightforward factual question. The answer: Paris.<|end|>
-<|start|>assistant<|channel|>final<|message|>The capital of France is **Paris**.<|return|>
+> Name three prime numbers.
+Sure! Here are three prime numbers:
+
+- 2
+- 3
+- 5
 ```
 
-On a raw completion the model puts 58.2% on " Paris" for "The capital of France
-is", with " a", ":" and " London" behind it.
+Roughly **1.4 tok/s decode, 2.2 tok/s prefill** on this machine, flat across
+the generation. That is device speed, not an inefficiency: the base 256 GB SSD
+reads ~2 GiB/s cold and the read path matches it. On Macs with larger, faster
+SSDs the same code should reach 3-5 tok/s.
 
-Verified against NumPy references at every level: MXFP4 decode, expert
-feed-forward, attention with sinks, and a complete layer including routing.
-
-**Decode is linear**, at 1.54 tok/s on an M4 Air with an eight-slot expert
-cache, flat across the generation rather than degrading. Prefill runs about
-1.9 tok/s.
-
-That is device speed, not an inefficiency: this machine's base 256 GB SSD
-reads ~2 GiB/s cold, and the runtime's read path matches it exactly. (The
-original ~5 tok/s projection came from a bandwidth benchmark contaminated by
-the page cache — `F_NOCACHE` does not evict already-cached pages.) On Macs
-with larger, faster SSDs the same design lands at roughly 3–5 tok/s.
-
-There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
-`o200k_harmony`, which matches the model's vocabulary exactly.
+Verified against NumPy references at every level — MXFP4 decode, expert
+feed-forward, attention with sinks, a complete layer including exact routing —
+and the tokeniser matches `tiktoken` exactly on 14 cases including emoji with
+ZWJ sequences, CJK, and Cyrillic.
 
 ## Requirements
 

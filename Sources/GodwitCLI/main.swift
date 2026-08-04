@@ -199,6 +199,131 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [],
     }
 }
 
+func runTokenize(model: String, text: String) {
+    do {
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let started = Date()
+        let tokenizer = try reader.loadTokenizer()
+        let load = Date().timeIntervalSince(started)
+
+        let ids = tokenizer.encode(text)
+        let round = tokenizer.decode(ids)
+        print(String(format: "loaded %d entries in %.2fs", tokenizer.count, load))
+        print("text   : \(text.debugDescription)")
+        print("ids    : \(ids.map(String.init).joined(separator: ","))")
+        print("pieces : \(ids.map { tokenizer.decode([$0]).debugDescription }.joined(separator: " "))")
+        print("decoded: \(round.debugDescription)")
+        print(round == text ? "\nround-trip exact" : "\nROUND-TRIP MISMATCH")
+        if round != text { exit(1) }
+    } catch {
+        FileHandle.standardError.write(Data("tokenize failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+func runChat(model: String, prompt: String?, system: String, count: Int,
+             slots: Int, settings: Sampler.Settings, showAnalysis: Bool) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let tokenizer = try reader.loadTokenizer()
+        let runner = ModelRunner(context: context, reader: reader)
+
+        FileHandle.standardError.write(Data("loading \(reader.manifest.model)...\n".utf8))
+        let weights = try runner.loadWeights()
+        let expertCache = try runner.makeExpertCache(slots: slots)
+        let stops = Conversation.stopTokens(tokenizer)
+
+        var conversation = Conversation(system: system)
+        let interactive = prompt == nil
+        if interactive {
+            FileHandle.standardError.write(Data(
+                "ready. blank line or /exit to quit, /reset to clear history.\n\n".utf8))
+        }
+
+        while true {
+            let question: String
+            if let prompt, conversation.messages.count <= 1 {
+                question = prompt
+            } else if interactive {
+                FileHandle.standardError.write(Data("> ".utf8))
+                guard let line = readLine(), !line.isEmpty else { break }
+                if line == "/exit" { break }
+                if line == "/reset" {
+                    conversation.reset()
+                    FileHandle.standardError.write(Data("history cleared\n\n".utf8))
+                    continue
+                }
+                question = line
+            } else { break }
+
+            conversation.append(Conversation.Message(.user, question))
+            let ids = try conversation.encode(with: tokenizer)
+
+            // Each turn re-encodes the whole conversation, so the cache is
+            // rebuilt from scratch. Reusing it across turns needs prefix
+            // matching, which is the obvious next step.
+            let cache = try runner.makeCache(maxContext: ids.count + count + 16)
+            var sampler = Sampler(settings: settings)
+
+            let prefillStart = Date()
+            var logits = try runner.logits(tokens: ids, positionBase: 0, cache: cache,
+                                           weights: weights, expertCache: expertCache)
+            let prefill = Date().timeIntervalSince(prefillStart)
+
+            var produced: [Int] = []
+            var emitted = ""
+            let decodeStart = Date()
+            for step in 0..<count {
+                let next = sampler.pick(from: logits, history: produced)
+                if stops.contains(next) { break }
+                produced.append(next)
+
+                // Decode the whole run each time: a multi-byte character can
+                // span tokens, so decoding one at a time would print mojibake.
+                // Stream only the answer channel unless asked for the reasoning,
+                // and emit the delta so nothing is printed twice.
+                let text = tokenizer.decode(produced)
+                let visible = showAnalysis ? text : Conversation.split(text).final
+                // Only append when the new text genuinely extends what was
+                // printed. Channel markers resolve mid-stream and can shorten
+                // or replace the visible span, and diffing by length alone
+                // splices fragments together.
+                if visible.hasPrefix(emitted) {
+                    if visible.count > emitted.count {
+                        print(String(visible.dropFirst(emitted.count)), terminator: "")
+                        fflush(stdout)
+                    }
+                } else if !visible.isEmpty {
+                    print("\r\u{1B}[2K" + visible, terminator: "")
+                    fflush(stdout)
+                }
+                emitted = visible
+                if step == count - 1 { break }
+                logits = try runner.logits(tokens: [next], positionBase: cache.length,
+                                           cache: cache, weights: weights,
+                                           expertCache: expertCache)
+            }
+            let decode = Date().timeIntervalSince(decodeStart)
+
+            let reply = tokenizer.decode(produced)
+            let parts = Conversation.split(reply)
+            conversation.append(Conversation.Message(.assistant, parts.final))
+
+            print()
+            FileHandle.standardError.write(Data(String(
+                format: "\n[%d prompt tokens %.1fs · %d generated %.2f tok/s]\n\n",
+                ids.count, prefill, produced.count,
+                Double(produced.count) / max(decode, 0.001)).utf8))
+
+            if prompt != nil { break }
+        }
+    } catch {
+        FileHandle.standardError.write(Data("chat failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 func runExpertVerification(directory: String) {
     do {
         let context = try MetalContext()
@@ -449,9 +574,11 @@ func runLayerCheck(model: String, reference: String) {
         let cache = try KVCache(context: context, spec: reader.manifest.spec,
                                 maxContext: max(tokens, 128), layerCount: layerIndex + 1)
         let started = Date()
-        let (produced, trace) = try layer.forward(
-            hidden: hidden, tokenCount: tokens, positionBase: 0,
+        // The reference stores FP16; the runtime's residual stream is FP32.
+        let (producedWide, trace) = try layer.forward(
+            hidden: hidden.map(Float.init), tokenCount: tokens, positionBase: 0,
             weights: weights, cache: cache)
+        let produced = producedWide.map(Float16.init)
         let elapsed = Date().timeIntervalSince(started)
 
         // Routing must match exactly. It is a discrete choice, so any drift
@@ -700,6 +827,50 @@ case "generate":
     }
     runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
                 profile: genProfile, pageCache: genPageCache)
+case "chat":
+    var chatModel: String?
+    var chatPrompt: String?
+    var chatSystem = "You are a helpful assistant."
+    var chatCount = 1024
+    var chatSlots = 8
+    var chatSettings = Sampler.Settings()
+    var showAnalysis = false
+    var chatFlags = arguments.dropFirst().makeIterator()
+    while let flag = chatFlags.next() {
+        switch flag {
+        case "--model", "-m": chatModel = chatFlags.next()
+        case "--prompt", "-p": chatPrompt = chatFlags.next()
+        case "--system": chatSystem = chatFlags.next() ?? chatSystem
+        case "--max", "-n": chatCount = chatFlags.next().flatMap(Int.init) ?? 1024
+        case "--slots": chatSlots = chatFlags.next().flatMap(Int.init) ?? 8
+        case "--temperature", "-t":
+            chatSettings.temperature = chatFlags.next().flatMap(Float.init) ?? 0.7
+        case "--top-k": chatSettings.topK = chatFlags.next().flatMap(Int.init) ?? 40
+        case "--top-p": chatSettings.topP = chatFlags.next().flatMap(Float.init) ?? 0.95
+        case "--repetition-penalty":
+            chatSettings.repetitionPenalty = chatFlags.next().flatMap(Float.init) ?? 1.0
+        case "--seed": chatSettings.seed = chatFlags.next().flatMap(UInt64.init) ?? 0
+        case "--greedy": chatSettings = .greedy
+        case "--show-analysis": showAnalysis = true
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    guard let chatModel else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit chat --model <dir> [--prompt TEXT] [--temperature N] [--greedy]\n".utf8))
+        exit(2)
+    }
+    runChat(model: chatModel, prompt: chatPrompt, system: chatSystem, count: chatCount,
+            slots: chatSlots, settings: chatSettings, showAnalysis: showAnalysis)
+case "tokenize":
+    let tokArgs = Array(arguments.dropFirst())
+    guard tokArgs.count >= 2 else {
+        FileHandle.standardError.write(Data("usage: godwit tokenize <gwt-dir> <text>\n".utf8))
+        exit(2)
+    }
+    runTokenize(model: tokArgs[0], text: tokArgs[1...].joined(separator: " "))
 case "logits":
     var logitsModel: String?
     var logitsTokens: [Int] = []
@@ -744,6 +915,7 @@ case nil:
     usage: godwit <command>
 
     commands:
+      chat             talk to the model (interactive, or --prompt for one shot)
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights
@@ -753,6 +925,7 @@ case nil:
       check-layer      run a complete transformer layer against a reference
       logits           run the full model and show next-token candidates
       generate         greedily generate tokens from a prompt
+      tokenize         encode and decode text with the model's tokeniser
       trace-routing    measure router skew from embeddings (superseded)
       trace-layers     run real layers and test whether routing is predictable
     """)

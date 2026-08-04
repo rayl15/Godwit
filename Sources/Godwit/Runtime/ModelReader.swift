@@ -142,6 +142,15 @@ extension ModelReader {
         return buffer
     }
 
+    /// The tokeniser that shipped with this installation.
+    public func loadTokenizer() throws -> Tokenizer {
+        let url = directory.appendingPathComponent("tokenizer.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw TokenizerError.notFound(url.path)
+        }
+        return try Tokenizer(contentsOf: url)
+    }
+
     public func trunkShape(_ name: String) throws -> [Int] {
         guard let section = manifest.trunkSections.first(where: { $0.name == name }) else {
             throw ExpertBlobError.missingSection(name)

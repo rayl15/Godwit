@@ -63,10 +63,19 @@ public struct TransformerLayer {
     ///
     /// `hidden` is the residual stream, `[tokenCount, hiddenSize]`, and is
     /// returned updated.
+    /// Runs the layer.
+    ///
+    /// The residual stream is FP32, not FP16, and that is not a precision
+    /// preference — it is a range requirement. GPT-OSS was trained in bfloat16,
+    /// which reaches ~3e38; FP16 stops at 65504. Certain prompts drive
+    /// activations past that, the stream becomes infinity, and the logits come
+    /// out NaN — which surfaces as the model emitting token 0 forever rather
+    /// than as any kind of error. Normalised values are still handed to the
+    /// kernels as FP16, since RMSNorm bounds them.
     public func forward(
-        hidden: [Float16], tokenCount: Int, positionBase: Int,
+        hidden: [Float], tokenCount: Int, positionBase: Int,
         weights: Weights, cache: KVCache, expertCache: ExpertCache? = nil
-    ) throws -> (hidden: [Float16], trace: Trace) {
+    ) throws -> (hidden: [Float], trace: Trace) {
         let width = spec.hiddenSize
         var stream = hidden
 
@@ -80,7 +89,7 @@ public struct TransformerLayer {
                                              cache: cache)
         timed("cpu:residual") {
             for i in 0..<(tokenCount * width) {
-                stream[i] = Float16(Float(stream[i]) + Float(attended[i]))
+                stream[i] += Float(attended[i])
             }
         }
 
@@ -171,7 +180,7 @@ public struct TransformerLayer {
             let combined = accumulated.contents().bindMemory(
                 to: Float.self, capacity: tokenCount * width)
             for i in 0..<(tokenCount * width) {
-                stream[i] = Float16(Float(stream[i]) + combined[i])
+                stream[i] += combined[i]
             }
         }
 
@@ -201,7 +210,7 @@ public struct TransformerLayer {
     /// layer performs; the GPU kernel exists for when the rest of the loop stops
     /// round-tripping through host memory.
     private func normalise(
-        _ values: [Float16], tokenCount: Int, weight: MTLBuffer
+        _ values: [Float], tokenCount: Int, weight: MTLBuffer
     ) throws -> [Float16] {
         let width = spec.hiddenSize
         let weights = weight.contents().bindMemory(to: UInt16.self, capacity: width)
@@ -211,13 +220,12 @@ public struct TransformerLayer {
             let base = token * width
             var sumSquares: Float = 0
             for i in 0..<width {
-                let value = Float(values[base + i])
+                let value = values[base + i]
                 sumSquares += value * value
             }
             let inverse = 1 / (sumSquares / Float(width) + spec.rmsNormEpsilon).squareRoot()
             for i in 0..<width {
-                out[base + i] = Float16(
-                    Float(values[base + i]) * inverse * BFloat16.toFloat(weights[i]))
+                out[base + i] = Float16(values[base + i] * inverse * BFloat16.toFloat(weights[i]))
             }
         }
         return out

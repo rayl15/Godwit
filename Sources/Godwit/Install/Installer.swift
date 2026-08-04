@@ -142,6 +142,12 @@ public struct Installer {
                               total: layerCount, bytesWritten: bytesWritten))
         }
 
+        // The tokeniser travels with the weights. Reading the checkpoint's own
+        // tokenizer.json means there is no second source of truth to drift.
+        let tokenizerData = try await streamer.fetch(
+            url: options.base.appendingPathComponent("tokenizer.json"))
+        try tokenizerData.write(to: directory.appendingPathComponent("tokenizer.json"))
+
         let trunk = try await installTrunk(to: directory, catalog: catalog,
                                            layerCount: layerCount, progress: progress)
         bytesWritten += trunk.totalSize

@@ -133,7 +133,7 @@ public struct LayerTrace {
     }
 
     /// Embeddings for a spread of token ids, dequantised from the trunk.
-    private func initialHidden(tokenCount: Int) throws -> [Float16] {
+    private func initialHidden(tokenCount: Int) throws -> [Float] {
         let spec = reader.manifest.spec
         let width = spec.hiddenSize
         let embed = try reader.loadTrunk(section: "embed", device: context.device)
@@ -143,7 +143,7 @@ public struct LayerTrace {
 
         let codes = embed.contents()
         let meta = codes.advanced(by: rows * width)
-        var out = [Float16](repeating: 0, count: tokenCount * width)
+        var out = [Float](repeating: 0, count: tokenCount * width)
 
         let stride = max(1, spec.vocabularySize / max(tokenCount, 1))
         for token in 0..<tokenCount {
@@ -157,7 +157,7 @@ public struct LayerTrace {
                 let zero = BFloat16.toFloat(metaRow[group * 2 + 1])
                 for i in 0..<Int8Affine.groupSize {
                     let index = group * Int8Affine.groupSize + i
-                    out[token * width + index] = Float16(Float(codeRow[index]) * scale + zero)
+                    out[token * width + index] = Float(codeRow[index]) * scale + zero
                 }
             }
         }
