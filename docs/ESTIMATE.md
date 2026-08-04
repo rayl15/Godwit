@@ -18,19 +18,28 @@ Model geometry from
 64 Q heads / 8 KV heads / head_dim 64, vocab 201088, sliding window **128**,
 alternating sliding and full attention.
 
-Storage measured on a 13" M4 MacBook Air, internal NVMe, using `pread` at
-12.6 MiB random blob-aligned offsets with `F_NOCACHE` and `F_RDAHEAD` disabled:
+Storage was measured on a 13" M4 MacBook Air's internal NVMe — **and that
+measurement was wrong**, in a way that shaped everything downstream:
 
-| Threads | Throughput |
-| ---: | ---: |
-| 1 | 3.08 GiB/s |
-| 4 | 4.24 GiB/s |
-| 8 | 5.08 GiB/s |
-| 12 | 7.62 GiB/s (short run) |
+| Threads | Reported then | Actual (cold) |
+| ---: | ---: | ---: |
+| 1 | 3.08 GiB/s | ~2.0 GiB/s |
+| 8 | 5.08 GiB/s | ~2.0 GiB/s |
 
-Control: the same benchmark with the page cache enabled reached 4.28 GiB/s
-single-threaded, only ~40% above the bypassed figure and identical at 8 threads,
-so the bypass is working and these are device numbers.
+The benchmark file was written with `dd` immediately before being read, and
+writing populates the unified buffer cache. `F_NOCACHE` prevents *new* caching
+but never evicts pages already present, so the benchmark read substantially
+from RAM. A control run at the time ("cache-enabled was only 40% faster")
+failed to catch it for the same reason: both configurations were mostly
+reading RAM.
+
+Every uncontaminated measurement agrees on the true figure: four different
+layer files at 1 and 8 threads, and the runtime's own profiler, all land at
+**1.85–2.08 GiB/s**. The M4 Air's base 256 GB SSD reads ~2 GiB/s cold for this
+pattern, regardless of concurrency, and regardless of file layout —
+`F_LOG2PHYS_EXT` mapping showed files with 26 extents and 705 extents read at
+identical speed. Larger Apple SSDs (512 GB–2 TB) are substantially faster and
+scale the design's throughput accordingly.
 
 ## Derived geometry
 

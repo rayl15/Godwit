@@ -106,6 +106,48 @@ public struct TransformerLayer {
             // Ask for all of this token's experts at once, so the planner sees
             // the whole working set and never evicts one it is about to need.
             var resolved: [ExpertRunner.Weights] = []
+            if let expertCache, !Self.overlapDisabled {
+                // Coarse overlap: miss reads start immediately and the GPU runs
+                // the resident experts while they are in flight. Their outputs
+                // are summed, so splitting the batch changes only the addition
+                // order — FP16-noise, checked by the layer regression test.
+                let unique = Array(Set(decision.experts))
+                let acquisition = expertCache.acquireAsync(layer: index, experts: unique)
+                var slotByExpert: [Int: Int] = [:]
+                var expertIsMiss: [Int: Bool] = [:]
+                for (position, expert) in unique.enumerated() {
+                    slotByExpert[expert] = acquisition.slots[position]
+                    expertIsMiss[expert] = acquisition.missPositions.contains(position)
+                }
+
+                var hitPairs: [(ExpertRunner.Weights, Float)] = []
+                var missPairs: [(ExpertRunner.Weights, Float)] = []
+                for (position, expert) in decision.experts.enumerated() {
+                    let weights = ExpertRunner.Weights(
+                        buffer: expertCache.buffer(layer: index, slot: slotByExpert[expert]!),
+                        offsets: offsets)
+                    if expertIsMiss[expert] == true {
+                        missPairs.append((weights, decision.weights[position]))
+                    } else {
+                        hitPairs.append((weights, decision.weights[position]))
+                    }
+                }
+
+                let hitOutput = try experts.applyBatch(slice, experts: hitPairs)
+                try acquisition.wait()
+                let missOutput = try experts.applyBatch(slice, experts: missPairs)
+
+                var combined = [Float](repeating: 0, count: width)
+                for i in 0..<width { combined[i] = hitOutput[i] + missOutput[i] }
+
+                timed("cpu:residual") {
+                    for i in 0..<width {
+                        stream[token * width + i] = Float16(
+                            Float(stream[token * width + i]) + combined[i])
+                    }
+                }
+                continue
+            }
             if let expertCache {
                 let unique = Array(Set(decision.experts))
                 let slots = try expertCache.acquire(layer: index, experts: unique)
@@ -142,6 +184,9 @@ public struct TransformerLayer {
 
         return (stream, Trace(routing: decisions))
     }
+
+    /// A/B switch for the read/compute overlap, for paired measurement.
+    static let overlapDisabled = ProcessInfo.processInfo.environment["GODWIT_NO_OVERLAP"] != nil
 
     /// Runs `body`, timing it only when a profiler is attached.
     ///

@@ -264,37 +264,39 @@ all — it treated slots as a free lever bounded only by RAM.
 
 Eight slots is the setting. It is also the cheapest.
 
-### What is actually left
+### Resolution: the reads were never slow
 
-Reads run at roughly 2 GiB/s inside the runtime. Three explanations were tested
-and none held:
+The gap between 2 GiB/s in the runtime and 5.08 in the standalone benchmark is
+closed, and it was the benchmark that was wrong. The benchmark file had just
+been written by `dd`, which populates the page cache; `F_NOCACHE` prevents new
+caching but does not evict existing pages, so those reads came substantially
+from RAM. (Confirmed against [direct-io's documentation](https://github.com/ronomon/direct-io)
+of `F_NOCACHE` semantics.)
 
-**Not request concurrency.** Reading misses in parallel did nothing, and
-benchmarking the real model file directly showed one thread and eight threads
-both reach ~2 GiB/s. Splitting each expert read into four concurrent chunks
-made it slightly worse (1.54 → 1.46 tok/s).
+Uncontaminated evidence, all agreeing on ~2 GiB/s cold:
 
-**Not fragmentation.** The installer writes tensor-major with scattered
-`pwrite`s, which looked like an obvious culprit. A forced byte copy of a layer
-file reads at the same speed as the original, so the physical layout is not the
-problem. An earlier note here claimed otherwise on the strength of a single
-unpaired measurement against a `cp` that APFS had silently turned into a
-copy-on-write clone; that claim was wrong and is retracted.
+- `nvmebench` against four different layer files: 1.85–2.08 GiB/s, identical
+  at 1 and 8 threads;
+- the runtime's own profiler: 23.5 GiB / 11.4 s = 2.06 GiB/s;
+- `F_LOG2PHYS_EXT` extent maps: files with 26 extents and 705 extents read at
+  the same speed, so physical layout is irrelevant;
+- splitting each read into concurrent chunks: slightly worse.
 
-**Not the page cache, mostly.** `F_NOCACHE` is worth about 8% and is kept, but
-it is not the difference between 2 and 5 GiB/s.
+**The runtime reads at device speed.** The M4 Air's base 256 GB SSD delivers
+~2 GiB/s for cold 12.6 MiB random reads, full stop. With the true bandwidth,
+the original feasibility model predicts ~2.0 tok/s at eight slots; measured is
+1.5 — the residual being compute that runs serially after reads.
 
-The gap against the 5.08 GiB/s the standalone benchmark reached remains
-unexplained. What differs between them is not yet isolated: the benchmark used
-a freshly written 6 GiB file with the machine otherwise idle, while the runtime
-reads a 59 GiB installation while holding 3.6 GiB of slots and 2.1 GiB of trunk
-resident. Measuring that properly needs a cold page cache, which needs `purge`
-and root.
+Part of that residual is now recovered: miss reads start asynchronously and
+the GPU runs the resident experts while they are in flight (TurboFieldfare's
+coarse overlap). Paired A/B: faster in 4 of 4 rounds, ~2–3% on decode and
+~4–5% on prefill. `GODWIT_NO_OVERLAP=1` preserves the serial path for
+measurement.
 
-The structural constraint stands regardless. Routing must finish before a read
-starts and the read before the expert runs, 36 times a token, with two or three
-misses outstanding at a time. Prefetch would break the chain and was measured
-not to work here.
+The design scales with the SSD. On the 512 GB–2 TB Apple SSDs that read at
+3–6 GiB/s cold, the same arithmetic gives roughly 3–5 tok/s — the range the
+original estimate promised, on the hardware whose bandwidth it accidentally
+assumed.
 
 ## Numerical precision## Numerical precision
 

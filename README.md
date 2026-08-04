@@ -50,10 +50,11 @@ feed-forward, attention with sinks, and a complete layer including routing.
 cache, flat across the generation rather than degrading. Prefill runs about
 1.9 tok/s.
 
-Still short of the ~5 tok/s projected. Profiling (`--profile`) puts **71.6% of
-decode in expert reads**, running at 1.97 GiB/s where the standalone benchmark
-reaches 5.08. The GPU is busy 17.6% of the time. Two earlier attempts to
-attribute this arithmetically said 24% and 28%; both were wrong.
+That is device speed, not an inefficiency: this machine's base 256 GB SSD
+reads ~2 GiB/s cold, and the runtime's read path matches it exactly. (The
+original ~5 tok/s projection came from a bandwidth benchmark contaminated by
+the page cache — `F_NOCACHE` does not evict already-cached pages.) On Macs
+with larger, faster SSDs the same design lands at roughly 3–5 tok/s.
 
 There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
 `o200k_harmony`, which matches the model's vocabulary exactly.

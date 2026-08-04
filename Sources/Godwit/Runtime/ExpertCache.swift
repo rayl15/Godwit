@@ -113,6 +113,69 @@ public final class ExpertCache {
     /// Bytes held resident by the cache.
     public var byteCount: Int { slotCount * layerCount * stride }
 
+    /// An in-flight acquisition: hit slots usable immediately, miss slots
+    /// usable after `wait()`.
+    ///
+    /// This split is the coarse overlap TurboFieldfare proved out: the GPU runs
+    /// the already-resident experts while the disk fills the missing ones,
+    /// instead of everything waiting on the slowest read. Reads are 73% of
+    /// decode, so any compute moved under them is free.
+    public struct Acquisition {
+        public let slots: [Int]
+        /// Positions in the request that must wait for their read.
+        public let missPositions: Set<Int>
+        let group: DispatchGroup
+        let failure: () -> Error?
+
+        /// Blocks until every miss read has landed, then surfaces any error.
+        public func wait() throws {
+            group.wait()
+            if let error = failure() { throw error }
+        }
+    }
+
+    /// Starts reads for `experts`' misses and returns immediately.
+    ///
+    /// The planner has already assigned each miss a distinct slot, disjoint
+    /// from every hit slot in the same plan, so the caller may run hit experts
+    /// on the GPU while the reads are in flight.
+    public func acquireAsync(layer: Int, experts: [Int]) -> Acquisition {
+        lock.lock()
+        let plan = planners[layer].plan(experts: experts)
+        lock.unlock()
+
+        stats.hits += plan.hitCount
+        stats.misses += plan.missCount
+        stats.bytesRead += stride * plan.missCount
+
+        let group = DispatchGroup()
+        let errorLock = NSLock()
+        nonisolated(unsafe) var firstError: Error?
+
+        for index in plan.missIndices {
+            let expert = plan.experts[index]
+            let slot = plan.slots[index]
+            let started = CFAbsoluteTimeGetCurrent()
+            DispatchQueue.global(qos: .userInitiated).async(group: group) { [self] in
+                do {
+                    try read(layer: layer, expert: expert, slot: slot)
+                } catch {
+                    errorLock.lock()
+                    if firstError == nil { firstError = error }
+                    errorLock.unlock()
+                }
+                profiler?.add("io:expert-read",
+                              wall: CFAbsoluteTimeGetCurrent() - started, bytes: stride)
+            }
+        }
+
+        return Acquisition(slots: plan.slots,
+                           missPositions: Set(plan.missIndices),
+                           group: group,
+                           failure: { errorLock.lock(); defer { errorLock.unlock() }
+                                      return firstError })
+    }
+
     /// Makes `experts` resident in `layer` and returns their slots, in order.
     ///
     /// Misses are read here; hits cost nothing. The planner decides placement
