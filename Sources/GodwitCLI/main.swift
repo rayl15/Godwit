@@ -371,6 +371,25 @@ func runLayerTrace(model: String, layers: Int, tokens: Int) {
                          mean * 100))
         }
 
+        // A high hit rate is only meaningful if routing is actually varying.
+        // If the residual stream degenerates and every token picks the same
+        // experts, the cache looks brilliant and the measurement is worthless.
+        var distinctPerLayer: [Int] = []
+        var collapsed = 0
+        for layer in 0..<available {
+            let used = Set(report.routing[layer].flatMap { $0 })
+            distinctPerLayer.append(used.count)
+            let first = Set(report.routing[layer][0])
+            if report.routing[layer].allSatisfy({ Set($0) == first }) { collapsed += 1 }
+        }
+        let meanDistinct = Double(distinctPerLayer.reduce(0, +)) / Double(available)
+        let ceiling = min(report.tokenCount * report.topK, report.expertCount)
+        print(String(format: "\n=== is routing actually varying? ===\n"
+                     + "distinct experts per layer: mean %.1f of %d "
+                     + "(ceiling %d for %d tokens)",
+                     meanDistinct, report.expertCount, ceiling, report.tokenCount))
+        print("layers where every token routed identically: \(collapsed) of \(available)")
+
         print("\n=== cache hit rate on the real trace ===")
         print("slots  hit rate")
         for entry in report.hitRates(slots: [4, 6, 8, 12, 16]) {

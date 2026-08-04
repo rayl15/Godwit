@@ -3,7 +3,7 @@
 Answers open question #2 in [DESIGN.md](DESIGN.md): what throughput does a 30:1
 stream-to-resident ratio actually produce?
 
-**Verdict: decode is viable at 3.0-4.4 tok/s on measured routing. Prefill costs a full pass over the
+**Verdict: decode is viable at ~5 tok/s today and ~10 with better kernels. Prefill costs a full pass over the
 routed pool per chunk, which makes chunk size the single most important
 parameter in the system.**
 
@@ -83,60 +83,80 @@ percentages.
 KV is cheap because the sliding window is only 128 tokens: **0.29 GiB at 8K
 context**, 1.13 GiB at 32K.
 
-## Cache hit rates — measured
+## Cache hit rates — measured on real layers
 
-Originally simulated with a Zipf exponent calibrated against TurboFieldfare's
-published 166 → 88 ms/token. That was the weakest input in this document, and
-`godwit trace-routing` has now replaced it with GPT-OSS's real router driving
-Godwit's real planner over 3,000 tokens.
+Three successive measurements, each better grounded than the last, and each
+revising the previous one upward:
 
-**The real router is less cacheable than the Zipf model predicted**, by roughly
-a third at every slot count:
+| Slots | Zipf model | Embedding proxy | **Real layers** |
+| ---: | ---: | ---: | ---: |
+| 4 | 13.6% | 8.3% | **53.2%** |
+| 6 | 27.7% | 18.1% | **67.1%** |
+| 8 | 35.5% | 24.8% | **73.6%** |
+| 12 | 45.3% | 33.5% | **79.4%** |
+| 16 | 51.6% | 39.0% | **82.7%** |
 
-| Slots/layer | Cache RAM | Zipf estimate | **Measured** | Reads/token |
+`godwit trace-layers` runs tokens through the actual 36 layers, so the residual
+stream is genuine rather than an embedding standing in for it. The earlier note
+that the proxy was "most likely a lower bound" was right, and by a factor of
+three.
+
+Real hidden states route far more consistently than embeddings do. Causal
+attention gives tokens a shared component that raw embeddings lack, and routing
+follows it.
+
+**Checked for the obvious failure mode.** A high hit rate would be worthless if
+the residual stream had degenerated and every token picked the same experts. It
+has not: 34.9 distinct experts per layer out of 128 across 64 tokens, and not one
+of the 36 layers routed identically for every token.
+
+### Prefetch does not work here
+
+| | |
+| --- | ---: |
+| Chance overlap (top-4 of 128) | 3.1% |
+| **Layer n predicting layer n+1** | **4.8%** |
+| Same layer, adjacent tokens | 54.0% |
+
+Copying a layer's expert choices to predict the next layer's is worth almost
+nothing — 4.8% against 3.1% for a random guess, stable from 8 to 64 tokens.
+
+This confirms TurboFieldfare's 7% on Gemma and contradicts colibrì's reported
+71.6% one-layer-ahead predictability, at least for naive copying on this model.
+colibrì may be using a learned predictor together with its pinned hot-store
+rather than a copy, in which case these numbers do not refute it — they only
+establish that the *cheap* version does not work.
+
+The control is the useful part. Adjacent tokens at one layer share 54% of their
+experts, eleven times what adjacent layers share. **Caching is the lever;
+cross-layer prefetch is not**, and the effort belongs in the slot cache.
+
+## Decode — the bottleneck has flipped
+
+With real hit rates, I/O is no longer the constraint. Compute is.
+
+| Slots | I/O | Compute (naive kernels) | tok/s now | tok/s if kernels improve |
 | ---: | ---: | ---: | ---: | ---: |
-| 4 | 1.77 GiB | 13.6% | **8.3%** | 132.0 |
-| 6 | 2.66 GiB | 27.7% | **18.1%** | 117.9 |
-| 8 | 3.55 GiB | 35.5% | **24.8%** | 108.3 |
-| 12 | 5.32 GiB | 45.3% | **33.5%** | 95.8 |
-| 16 | 7.09 GiB | 51.6% | **39.0%** | 87.8 |
+| 4 | 163 ms | 179 ms | 4.72 | 5.76 |
+| 6 | 115 ms | 179 ms | 4.95 | 8.00 |
+| 8 | **92 ms** | **179 ms** | **5.06** | **9.77** |
+| 12 | 72 ms | 179 ms | 5.17 | 12.18 |
+| 16 | 60 ms | 179 ms | 5.23 | 14.16 |
 
-The router is close to balanced, which is what a load-balancing training loss is
-supposed to produce: normalised entropy 0.912 against 1.0 for uniform, and **not
-one of the 128 experts went unused**. But it is not flat — the top decile takes
-36.6% of all selections against 10% for uniform, and expert 12 alone was chosen
-11× more often than the mean. That residual skew is what the cache lives on.
+Each token multiplies 3.58B quantised expert weights. At the 20 G weights/s the
+current naive kernels manage, that is 179 ms — nearly double the 92 ms of reads
+at eight slots. Adding cache slots barely helps now, because the thing they
+reduce is no longer what dominates.
 
-**Two limitations, and they push in opposite directions.**
+The right-hand column assumes 70 G weights/s, which is what TurboFieldfare's
+persistent-workgroup redesign achieved relative to their naive kernel. Their
+routed phase fell from 239 ms to 60 ms, a 75% reduction, and our kernels are
+using roughly 10% of the M4's memory bandwidth, so the headroom is plausibly
+there.
 
-Hidden states here are normalised token embeddings, not `norm(residual +
-attention)`, because attention is not implemented yet. Real states carry
-contextual structure this does not reproduce.
-
-Against that, the trace samples token ids strided across the whole vocabulary,
-which is close to maximally decorrelated. Real text has strong temporal
-locality — consecutive tokens share context, so their hidden states and
-therefore their expert choices should correlate. **That makes these numbers
-most likely a lower bound**, and re-measuring on a real forward pass is the
-obvious next refinement.
-
-## Decode
-
-Assumes 8-thread read bandwidth, and that overlap hides only half the compute —
-**GPT-OSS has no shared-expert branch**, so there is less resident GPU work to
-hide reads behind than TurboFieldfare had.
-
-| Slots | Total RAM | I/O time | Compute | tok/s (Zipf) | **tok/s (measured)** |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 4.17 GiB | 320 ms | 27 ms | 3.17 | **3.00** |
-| 6 | 5.06 GiB | 286 ms | 27 ms | 3.76 | **3.34** |
-| 8 | 5.95 GiB | 262 ms | 27 ms | 4.19 | **3.62** |
-| 12 | 7.72 GiB | 232 ms | 27 ms | 4.89 | **4.07** |
-| 16 | 9.49 GiB | 213 ms | 27 ms | 5.48 | **4.42** |
-
-8-12 slots is the sweet spot: 6.0-7.7 GiB total leaves real headroom on a 16 GB
-machine, and the returns above 12 slots are thin. Throughput is unchanged by the
-8-bit trunk — the extra 0.54 GiB comes out of headroom, not cache slots.
+**This reorders the work.** Persistent workgroups were filed as an
+optimisation; they are now the single thing standing between ~5 tok/s and ~10.
+Expert-cache slot count, by contrast, has become a second-order tuning knob.
 
 ## Prefill
 
