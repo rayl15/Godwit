@@ -236,11 +236,44 @@ at eight threads in the standalone benchmark. Reading the misses concurrently
 was tried and did **not** help: at eight slots a token has only two or three
 misses per layer, so there is never enough outstanding work to saturate NVMe.
 
-The structure is the problem, not the loop. Routing must finish before a read
-can start, and the read must finish before the expert can run, once per layer,
-36 times per token. Prefetch would break the chain — and it was measured not to
-work on this model. What is left to try: fewer misses (more slots), or reads
-issued for several layers at once, which the current shape forbids.
+Bypassing the page cache with `F_NOCACHE` is worth about 8% (1.43 → 1.54
+tok/s). We hold the experts we want in our own slots, so the page cache only
+buys a second copy of 59 GiB it cannot hold anyway, and evicts something useful
+ time. Worth having, not a fix.
+
+### More cache slots do not help
+
+The obvious lever, measured:
+
+| Slots | Cache RAM | Hit rate | Decode |
+| ---: | ---: | ---: | ---: |
+| 8 | 3.56 GiB | 42.7% | **1.54 tok/s** |
+| 12 | 5.35 GiB | 49.8% | 1.50 tok/s |
+| 16 | 7.13 GiB | 55.6% | 1.48 tok/s |
+| 24 | 10.69 GiB | 64.1% | **0.12 tok/s** |
+
+Hit rate rises monotonically and throughput does not. From 8 to 16 slots misses
+fall 23% while read time falls 6% — per-read latency dominates, not bytes — and
+the larger cache starves the rest of the system of exactly the memory that
+makes reads fast.
+
+At 24 slots it collapses outright: 10.7 GiB of slots plus 2.1 GiB of trunk on a
+16 GB machine swaps, and GPU utilisation drops to 1.5%. **Memory pressure, not
+hit rate, sets the ceiling**, which the feasibility estimate did not model at
+all — it treated slots as a free lever bounded only by RAM.
+
+Eight slots is the setting. It is also the cheapest.
+
+### What is actually left
+
+The structure is the constraint. Routing must finish before a read can start,
+and the read before the expert runs, 36 times a token, with only two or three
+misses outstanding at any moment. Prefetch would break that chain and was
+measured not to work here.
+
+That leaves reads issued for several layers at once, which the current shape
+forbids, or accepting that a streaming design on this hardware lands near
+1.5 tok/s.
 
 ## Numerical precision## Numerical precision
 

@@ -128,7 +128,7 @@ func runLogits(model: String, tokens: [Int], topK: Int) {
 }
 
 func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [],
-                 slots: Int = 8, profile: Bool = false) {
+                 slots: Int = 8, profile: Bool = false, pageCache: Bool = false) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
@@ -136,7 +136,8 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [],
         let weights = try runner.loadWeights()
 
         let cache = try runner.makeCache(maxContext: tokens.count + count + 16)
-        let expertCache = try runner.makeExpertCache(slots: slots)
+        let expertCache = try runner.makeExpertCache(slots: slots,
+                                                     bypassPageCache: !pageCache)
         var profiler: Profiler?
         if profile {
             let p = Profiler()
@@ -676,6 +677,7 @@ case "generate":
     var genStop: [Int] = []
     var genSlots = 8
     var genProfile = false
+    var genPageCache = false
     var genFlags = arguments.dropFirst().makeIterator()
     while let flag = genFlags.next() {
         switch flag {
@@ -685,6 +687,7 @@ case "generate":
         case "--count", "-n": genCount = genFlags.next().flatMap(Int.init) ?? 16
         case "--slots": genSlots = genFlags.next().flatMap(Int.init) ?? 8
         case "--profile": genProfile = true
+        case "--page-cache": genPageCache = true
         case "--stop": genStop = (genFlags.next() ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         default: break
@@ -696,7 +699,7 @@ case "generate":
         exit(2)
     }
     runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
-                profile: genProfile)
+                profile: genProfile, pageCache: genPageCache)
 case "logits":
     var logitsModel: String?
     var logitsTokens: [Int] = []

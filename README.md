@@ -46,7 +46,7 @@ is", with " a", ":" and " London" behind it.
 Verified against NumPy references at every level: MXFP4 decode, expert
 feed-forward, attention with sinks, and a complete layer including routing.
 
-**Decode is linear**, at 1.42 tok/s on an M4 Air with an eight-slot expert
+**Decode is linear**, at 1.54 tok/s on an M4 Air with an eight-slot expert
 cache, flat across the generation rather than degrading. Prefill runs about
 1.9 tok/s.
 

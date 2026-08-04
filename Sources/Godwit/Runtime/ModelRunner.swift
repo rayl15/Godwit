@@ -63,8 +63,9 @@ public struct ModelRunner {
     ///
     /// Eight slots per layer is the measured sweet spot: 73.6% hit rate for
     /// 3.6 GiB, with returns flattening above twelve.
-    public func makeExpertCache(slots: Int = 8) throws -> ExpertCache {
-        try ExpertCache(context: context, reader: reader, slotCount: slots)
+    public func makeExpertCache(slots: Int = 8, bypassPageCache: Bool = true) throws -> ExpertCache {
+        try ExpertCache(context: context, reader: reader, slotCount: slots,
+                        bypassPageCache: bypassPageCache)
     }
 
     /// Allocates a KV cache sized for `maxContext` tokens.

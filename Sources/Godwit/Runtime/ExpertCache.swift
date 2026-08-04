@@ -45,7 +45,8 @@ public final class ExpertCache {
     private var descriptors: [Int32]
     private let lock = NSLock()
 
-    public init(context: MetalContext, reader: ModelReader, slotCount: Int = 8) throws {
+    public init(context: MetalContext, reader: ModelReader, slotCount: Int = 8,
+                bypassPageCache: Bool = true) throws {
         self.reader = reader
         self.slotCount = slotCount
         self.layerCount = reader.manifest.layerCount
@@ -70,6 +71,19 @@ public final class ExpertCache {
                 .path
             let fd = open(path, O_RDONLY)
             guard fd >= 0 else { throw ExpertBlobError.openFailed(path: path, errno: errno) }
+
+            // Bypass the unified buffer cache.
+            //
+            // We already hold the experts we want in our own slots, so the page
+            // cache only buys a second copy of 59 GiB it cannot hold anyway on a
+            // 16 GB machine — every read pays a copy into cache and out again,
+            // and evicts something useful doing it. Reads here are page-aligned
+            // in both offset and destination, which is what F_NOCACHE needs to
+            // be fast rather than pathological.
+            if bypassPageCache {
+                if fcntl(fd, F_NOCACHE, 1) < 0 { perror("F_NOCACHE") }
+                if fcntl(fd, F_RDAHEAD, 0) < 0 { perror("F_RDAHEAD") }
+            }
             descriptors.append(fd)
 
             var layerBuffers: [MTLBuffer] = []
