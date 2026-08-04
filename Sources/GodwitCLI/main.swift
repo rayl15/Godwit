@@ -338,6 +338,50 @@ func runLayerCheck(model: String, reference: String) {
     }
 }
 
+func runLayerTrace(model: String, layers: Int, tokens: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let available = min(layers, reader.manifest.layerCount)
+        let report = try LayerTrace(context: context, reader: reader)
+            .run(layerCount: available, tokenCount: tokens)
+
+        print("\(available) layers x \(report.tokenCount) tokens, "
+              + "top-\(report.topK) of \(report.expertCount) "
+              + String(format: "(%.1fs)", report.seconds))
+        print(String(format: "chance overlap: %.1f%%\n", report.chanceOverlap * 100))
+
+        let adjacent = report.adjacentOverlap
+        if !adjacent.isEmpty {
+            let mean = adjacent.reduce(0, +) / Double(adjacent.count)
+            print("=== can layer n predict layer n+1? ===")
+            print(String(format: "mean overlap %.1f%%  (min %.1f%%, max %.1f%%)",
+                         mean * 100, (adjacent.min() ?? 0) * 100, (adjacent.max() ?? 0) * 100))
+            print(String(format: "vs chance    %.1f%%  -> %@",
+                         report.chanceOverlap * 100,
+                         mean > report.chanceOverlap * 3
+                            ? "predictable; prefetch is worth building" as NSString
+                            : "barely above chance; prefetch will not pay" as NSString))
+        }
+
+        let sameLayer = report.tokenToTokenOverlap
+        if !sameLayer.isEmpty {
+            let mean = sameLayer.reduce(0, +) / Double(sameLayer.count)
+            print(String(format: "\n=== control: same layer, adjacent tokens ===\nmean overlap %.1f%%",
+                         mean * 100))
+        }
+
+        print("\n=== cache hit rate on the real trace ===")
+        print("slots  hit rate")
+        for entry in report.hitRates(slots: [4, 6, 8, 12, 16]) {
+            print(String(format: "%5d   %6.1f%%", entry.slots, entry.rate * 100))
+        }
+    } catch {
+        FileHandle.standardError.write(Data("layer trace failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -364,6 +408,27 @@ case "install":
         exit(2)
     }
     await runInstall(directory: target, layerLimit: limit)
+case "trace-layers":
+    var traceModel: String?
+    var traceLayers = 36
+    var traceTokens = 24
+    var traceFlags = arguments.dropFirst().makeIterator()
+    while let flag = traceFlags.next() {
+        switch flag {
+        case "--model", "-m": traceModel = traceFlags.next()
+        case "--layers": traceLayers = traceFlags.next().flatMap(Int.init) ?? 36
+        case "--tokens": traceTokens = traceFlags.next().flatMap(Int.init) ?? 24
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    guard let traceModel else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit trace-layers --model <dir> [--layers N] [--tokens N]\n".utf8))
+        exit(2)
+    }
+    runLayerTrace(model: traceModel, layers: traceLayers, tokens: traceTokens)
 case "trace-routing":
     var model: String?
     var layer = 0
@@ -432,6 +497,7 @@ case nil:
       check-expert     run one installed expert and compare against a reference
       check-attention  run one layer's attention and compare against a reference
       check-layer      run a complete transformer layer against a reference
-      trace-routing    measure real router skew and resulting cache hit rates
+      trace-routing    measure router skew from embeddings (superseded)
+      trace-layers     run real layers and test whether routing is predictable
     """)
 }
