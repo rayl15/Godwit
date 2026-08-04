@@ -166,21 +166,65 @@ public final class ExpertCache {
         buffers[layer][slot]
     }
 
+    /// Concurrent chunks per expert read.
+    ///
+    /// Set to 1: splitting a read was tried and measured slightly *worse*
+    /// (1.54 → 1.46 tok/s). The premise was that one `pread` is one outstanding
+    /// request and the device wants several, but benchmarking the real model
+    /// file showed one thread and eight threads both reach ~2 GiB/s. Whatever
+    /// limits reads here, it is not the number of requests in flight.
+    public static let readChunks = 1
+
     /// Reads one whole expert stride into a slot.
     private func read(layer: Int, expert: Int, slot: Int) throws {
         let fd = descriptors[layer]
         let destination = buffers[layer][slot].contents()
-        let offset = expert * stride
+        let base = expert * stride
+
+        let chunks = Self.readChunks
+        guard chunks > 1 else {
+            try readRange(fd: fd, into: destination, offset: base, length: stride, layer: layer)
+            return
+        }
+
+        // Page-aligned chunk boundaries: F_NOCACHE requires alignment to be
+        // fast, and the stride is a page multiple by construction.
+        let pageSize = Int(getpagesize())
+        let raw = (stride + chunks - 1) / chunks
+        let chunkSize = (raw + pageSize - 1) / pageSize * pageSize
+
+        let errorLock = NSLock()
+        nonisolated(unsafe) var failure: Error?
+        DispatchQueue.concurrentPerform(iterations: chunks) { index in
+            let start = index * chunkSize
+            guard start < stride else { return }
+            let length = min(chunkSize, stride - start)
+            do {
+                try readRange(fd: fd, into: destination.advanced(by: start),
+                              offset: base + start, length: length, layer: layer)
+            } catch {
+                errorLock.lock()
+                if failure == nil { failure = error }
+                errorLock.unlock()
+            }
+        }
+        if let failure { throw failure }
+    }
+
+    private func readRange(
+        fd: Int32, into destination: UnsafeMutableRawPointer,
+        offset: Int, length: Int, layer: Int
+    ) throws {
         var filled = 0
-        while filled < stride {
-            let got = pread(fd, destination.advanced(by: filled), stride - filled,
+        while filled < length {
+            let got = pread(fd, destination.advanced(by: filled), length - filled,
                             off_t(offset + filled))
             if got < 0 {
                 throw ExpertBlobError.readFailed(section: "layer \(layer)", errno: errno)
             }
             if got == 0 {
                 throw ExpertBlobError.shortRead(section: "layer \(layer)",
-                                                got: filled, want: stride)
+                                                got: filled, want: length)
             }
             filled += got
         }

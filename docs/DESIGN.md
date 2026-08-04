@@ -266,14 +266,35 @@ Eight slots is the setting. It is also the cheapest.
 
 ### What is actually left
 
-The structure is the constraint. Routing must finish before a read can start,
-and the read before the expert runs, 36 times a token, with only two or three
-misses outstanding at any moment. Prefetch would break that chain and was
-measured not to work here.
+Reads run at roughly 2 GiB/s inside the runtime. Three explanations were tested
+and none held:
 
-That leaves reads issued for several layers at once, which the current shape
-forbids, or accepting that a streaming design on this hardware lands near
-1.5 tok/s.
+**Not request concurrency.** Reading misses in parallel did nothing, and
+benchmarking the real model file directly showed one thread and eight threads
+both reach ~2 GiB/s. Splitting each expert read into four concurrent chunks
+made it slightly worse (1.54 → 1.46 tok/s).
+
+**Not fragmentation.** The installer writes tensor-major with scattered
+`pwrite`s, which looked like an obvious culprit. A forced byte copy of a layer
+file reads at the same speed as the original, so the physical layout is not the
+problem. An earlier note here claimed otherwise on the strength of a single
+unpaired measurement against a `cp` that APFS had silently turned into a
+copy-on-write clone; that claim was wrong and is retracted.
+
+**Not the page cache, mostly.** `F_NOCACHE` is worth about 8% and is kept, but
+it is not the difference between 2 and 5 GiB/s.
+
+The gap against the 5.08 GiB/s the standalone benchmark reached remains
+unexplained. What differs between them is not yet isolated: the benchmark used
+a freshly written 6 GiB file with the machine otherwise idle, while the runtime
+reads a 59 GiB installation while holding 3.6 GiB of slots and 2.1 GiB of trunk
+resident. Measuring that properly needs a cold page cache, which needs `purge`
+and root.
+
+The structural constraint stands regardless. Routing must finish before a read
+starts and the read before the expert runs, 36 times a token, with two or three
+misses outstanding at a time. Prefetch would break the chain and was measured
+not to work here.
 
 ## Numerical precision## Numerical precision
 
