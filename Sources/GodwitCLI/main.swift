@@ -1,27 +1,74 @@
 import Foundation
 import Godwit
 
-// Placeholder entry point. The CLI grows once there is a model format to load;
-// for now it exists so the package has a runnable product.
+// GPT-OSS-120B decode budget, from docs/ESTIMATE.md. Every token multiplies
+// this many quantised expert weights, and it has to fit inside the time the
+// expert reads take, or compute becomes the bottleneck instead of I/O.
+let expertParams = 2 * 2880 * 2880 + 2880 * 2880
+let weightsPerToken = Double(4 * 36 * expertParams)
+let ioBudgetSeconds = 0.225   // 8 cache slots, measured NVMe bandwidth
+let requiredWeightsPerSecond = weightsPerToken / ioBudgetSeconds
 
-let arguments = CommandLine.arguments.dropFirst()
+func runDequantBenchmark() {
+    do {
+        let context = try MetalContext()
+        let benchmark = DequantGEMVBenchmark(context: context)
 
-guard let command = arguments.first else {
+        print("device: \(context.device.name)")
+        print("""
+              budget: \(String(format: "%.2f", weightsPerToken / 1e9))B expert weights/token \
+              in \(Int(ioBudgetSeconds * 1000)) ms
+              """)
+        print("        => need \(String(format: "%.1f", requiredWeightsPerSecond / 1e9)) G weights/s\n")
+
+        // GPT-OSS expert shapes: gate+up is 5760x2880, down is 2880x2880.
+        let shapes = [(rows: 5760, cols: 2880), (rows: 2880, cols: 2880)]
+
+        for shape in shapes {
+            print("--- \(shape.rows) x \(shape.cols) ---")
+            let results = [
+                try benchmark.runMXFP4(rows: shape.rows, cols: shape.cols,
+                                       iterations: 200, validate: true),
+                try benchmark.runAffineInt4(rows: shape.rows, cols: shape.cols,
+                                            iterations: 200),
+            ]
+            for result in results {
+                let headroom = result.weightsPerSecond / requiredWeightsPerSecond
+                let error = result.maxAbsoluteError.map { String(format: "%.2e", $0) } ?? "-"
+                print(String(
+                    format: "  %-32@  %6.1f G w/s  %6.1f GiB/s  %5.2fx budget  err %@",
+                    result.label as NSString,
+                    result.weightsPerSecond / 1e9,
+                    result.gibPerSecond,
+                    headroom,
+                    error as NSString))
+            }
+            print()
+        }
+    } catch {
+        FileHandle.standardError.write(Data("benchmark failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+let arguments = Array(CommandLine.arguments.dropFirst())
+
+switch arguments.first {
+case "version":
+    print("godwit 0.0.1-dev")
+case "bench" where arguments.dropFirst().first == "dequant":
+    runDequantBenchmark()
+case let other?:
+    FileHandle.standardError.write(Data("unknown command: \(other)\n".utf8))
+    exit(1)
+case nil:
     print("""
     godwit — streaming mixture-of-experts inference for memory-constrained machines
 
     usage: godwit <command>
 
     commands:
-      version    print the version
+      version          print the version
+      bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
     """)
-    exit(0)
-}
-
-switch command {
-case "version":
-    print("godwit 0.0.1-dev")
-default:
-    FileHandle.standardError.write(Data("unknown command: \(command)\n".utf8))
-    exit(1)
 }

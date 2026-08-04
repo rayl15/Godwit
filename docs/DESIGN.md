@@ -65,16 +65,31 @@ should expect to solve prefill ourselves rather than inherit it.
 These are the decisions that determine whether the project works. In rough
 order of how badly a wrong answer hurts.
 
-### 1. Is MXFP4 dequantisation fast enough on GPU?
+### 1. Is MXFP4 dequantisation fast enough on GPU? — ANSWERED, with a caveat
 
-**This is the go/no-go.** MLX affine-int4 has a BF16 scale and bias per group of
-64. MXFP4 has an E8M0 shared exponent per block of 32 and no bias — a smaller
-block, a different unpack, and a codebook lookup instead of an affine transform.
+**MXFP4 is not the problem.** Measured on an M4 with fused dequant-GEMV kernels
+of identical structure (`godwit bench dequant`, median of 7 rounds):
 
-If per-block overhead dominates at block size 32, the entire target model family
-is off the table and we should reconsider. `MXFP4.swift` is the CPU ground
-truth; the next step is a Metal kernel validated against it and benchmarked
-against a plain affine-int4 kernel of the same shape.
+| Shape | MXFP4 | affine int4 |
+| --- | ---: | ---: |
+| 5760 × 2880 | 27.8-33.2 G weights/s | 22.3-26.1 |
+| 2880 × 2880 | 12.9-16.8 G weights/s | 12.2-15.1 |
+
+MXFP4 was ahead in five of six paired comparisons. The smaller block and
+codebook lookup cost nothing measurable, so the format choice does not decide
+the project. GPU output is validated against `MXFP4.swift` to a relative error
+below 1e-3, and that check is a test.
+
+**The caveat is the kernel, not the format.** Against the 15.9 G weights/s
+decode budget, the narrow shape lands at 0.81-1.06× — marginal or short. But
+these naive kernels reach only 6-16 GiB/s where the M4 has roughly 120 GB/s of
+memory bandwidth, so they are latency- and occupancy-bound, not bandwidth-bound.
+The wide shape is consistently ~2× the narrow one at the same total work, which
+points at threadgroup count rather than arithmetic.
+
+That is the same wall TurboFieldfare hit, and persistent workgroups took their
+routed phase from 239 to 60 ms. Applying that here is the next kernel task, and
+there is a large amount of headroom to claim.
 
 ### 2. What is the real ceiling at a 30:1 stream-to-resident ratio? — ANSWERED
 
