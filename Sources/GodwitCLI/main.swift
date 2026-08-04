@@ -106,6 +106,58 @@ func runInstall(directory: String, layerLimit: Int?) async {
     }
 }
 
+func runExpertCheck(model: String, reference: String) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let runner = ExpertRunner(context: context, reader: reader)
+
+        let refDir = URL(fileURLWithPath: reference)
+        let caseData = try Data(contentsOf: refDir.appendingPathComponent("case.json"))
+        let info = try JSONSerialization.jsonObject(with: caseData) as! [String: Any]
+        let layer = info["layer"] as! Int
+        let expert = info["expert"] as! Int
+        let hidden = info["hiddenSize"] as! Int
+
+        func load<T>(_ name: String, _ type: T.Type, _ count: Int) throws -> [T] {
+            let data = try Data(contentsOf: refDir.appendingPathComponent(name))
+            return data.withUnsafeBytes {
+                Array(UnsafeBufferPointer(start: $0.bindMemory(to: T.self).baseAddress!,
+                                          count: count))
+            }
+        }
+        let x: [Float16] = try load("x.f16", Float16.self, hidden)
+        let expected: [Float] = try load("y.f32", Float.self, hidden)
+
+        let weights = try runner.loadWeights(layer: layer, expert: expert)
+        let produced = try runner.apply(x, weights: weights)
+
+        var magnitude: Float = 0
+        for value in expected { magnitude += abs(value) }
+        magnitude = max(magnitude / Float(expected.count), 1e-6)
+
+        var worst: Float = 0
+        var worstIndex = 0
+        for i in expected.indices {
+            let error = abs(produced[i] - expected[i]) / magnitude
+            if error > worst { worst = error; worstIndex = i }
+        }
+
+        print("layer \(layer) expert \(expert), \(hidden) outputs")
+        print(String(format: "max relative error %.3e at index %d (|y| ~ %.4f)",
+                     worst, worstIndex, magnitude))
+        if worst < 5e-3 {
+            print("\nPASS — GPU expert matches the NumPy reference")
+        } else {
+            print("\nFAIL — expert output diverges")
+            exit(1)
+        }
+    } catch {
+        FileHandle.standardError.write(Data("expert check failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -132,6 +184,14 @@ case "install":
         exit(2)
     }
     await runInstall(directory: target, layerLimit: limit)
+case "check-expert":
+    let rest = Array(arguments.dropFirst())
+    guard rest.count == 2 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit check-expert <gwt-dir> <reference-dir>\n".utf8))
+        exit(2)
+    }
+    runExpertCheck(model: rest[0], reference: rest[1])
 case "verify-expert":
     guard let directory = arguments.dropFirst().first else {
         FileHandle.standardError.write(Data("usage: godwit verify-expert <fixture-dir>\n".utf8))
@@ -152,5 +212,6 @@ case nil:
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights
       install          stream and repack the checkpoint into a .gwt directory
+      check-expert     run one installed expert and compare against a reference
     """)
 }

@@ -15,6 +15,13 @@ public enum AttentionKind: String, Codable, Sendable {
 public enum FeedForwardActivation: String, Codable, Sendable {
     case silu
     case geluTanh
+    /// GPT-OSS's expert gate: `(up + 1) * gate * sigmoid(alpha * gate)`, with
+    /// `gate` clamped above only and `up` clamped both ways.
+    ///
+    /// Named separately because `config.json` reports `hidden_act: "silu"`,
+    /// which is not what the experts actually compute. The `+1` shift and the
+    /// asymmetric clamp are both load-bearing.
+    case gptOssClampedGLU
 }
 
 /// One transformer layer's shape.
@@ -77,6 +84,10 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
     public let expertBias: Bool
     /// Whether the router carries a bias vector.
     public let routerBias: Bool
+    /// Clamp bound for `gptOssClampedGLU`. GPT-OSS uses 7.0.
+    public let activationLimit: Float
+    /// Sigmoid steepness for `gptOssClampedGLU`. GPT-OSS uses 1.702.
+    public let activationAlpha: Float
     public let layers: [LayerSpec]
 
     public init(
@@ -96,6 +107,8 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         attentionBias: Bool = false,
         expertBias: Bool = false,
         routerBias: Bool = false,
+        activationLimit: Float = 7.0,
+        activationAlpha: Float = 1.702,
         layers: [LayerSpec]
     ) {
         self.name = name
@@ -114,6 +127,8 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         self.attentionBias = attentionBias
         self.expertBias = expertBias
         self.routerBias = routerBias
+        self.activationLimit = activationLimit
+        self.activationAlpha = activationAlpha
         self.layers = layers
     }
 
@@ -159,7 +174,7 @@ extension ArchitectureSpec {
             vocabularySize: 201088,
             ropeTheta: 150_000,
             rmsNormEpsilon: 1e-5,
-            activation: .silu,
+            activation: .gptOssClampedGLU,
             logitSoftcap: nil,
             tiedEmbedding: false,
             attentionSinks: true,

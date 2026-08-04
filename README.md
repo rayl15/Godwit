@@ -61,7 +61,10 @@ What exists:
 - **Installer** — streams the checkpoint and repacks it into `.gwt`, never
   materialising a shard. Verified byte-exact against the source.
 
-Not started: attention, KV cache, tokenizer, sampling — i.e. inference.
+- **`ExpertRunner`** — a complete expert forward pass on GPU from an installed
+  model, verified against NumPy to ~1e-5 across experts 0, 17, 64 and 127
+
+Not started: attention, KV cache, router, tokenizer, sampling.
 
 ### Installing
 

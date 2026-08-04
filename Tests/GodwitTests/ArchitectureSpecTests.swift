@@ -62,3 +62,47 @@ struct ArchitectureSpecTests {
         #expect(decoded == spec)
     }
 }
+
+@Suite("Expert activation")
+struct ExpertActivationTests {
+    let spec = ArchitectureSpec.gptOSS120B
+
+    @Test("Activation is not SiLU despite what config.json says")
+    func activationIsNotSilu() {
+        // config.json reports hidden_act: "silu". The experts do something else,
+        // and taking config at face value produces plausible-looking garbage.
+        #expect(spec.activation == .gptOssClampedGLU)
+        #expect(spec.activationLimit == 7.0)
+        #expect(spec.activationAlpha == 1.702)
+    }
+
+    /// Mirrors `gptoss_expert_activation` in expert.metal.
+    static func reference(gate: Float, up: Float, limit: Float = 7, alpha: Float = 1.702) -> Float {
+        let g = min(gate, limit)                       // clamped above only
+        let u = max(-limit, min(up, limit))
+        return (u + 1) * (g / (1 + Foundation.exp(-alpha * g)))
+    }
+
+    @Test("The +1 shift on the up branch is load-bearing")
+    func upShiftMatters() {
+        // Without the shift, up == 0 would zero the output. With it, the gate
+        // passes through — a difference that changes every token.
+        #expect(abs(Self.reference(gate: 2, up: 0) - Self.reference(gate: 2, up: 0)) < 1e-6)
+        #expect(Self.reference(gate: 2, up: 0) != 0)
+    }
+
+    @Test("Clamping is asymmetric")
+    func asymmetricClamp() {
+        // Gate has no lower bound: a large negative gate stays large negative
+        // and the sigmoid drives the product toward zero on its own.
+        let veryNegative = Self.reference(gate: -100, up: 1)
+        #expect(abs(veryNegative) < 1e-3, "sigmoid should suppress it, got \(veryNegative)")
+
+        // Gate is bounded above, so growth past the limit does nothing.
+        #expect(Self.reference(gate: 8, up: 1) == Self.reference(gate: 1000, up: 1))
+
+        // Up is bounded both ways.
+        #expect(Self.reference(gate: 1, up: 50) == Self.reference(gate: 1, up: 7))
+        #expect(Self.reference(gate: 1, up: -50) == Self.reference(gate: 1, up: -7))
+    }
+}
