@@ -13,13 +13,18 @@ public struct ExpertRunner {
     public let hiddenSize: Int
     public let intermediateSize: Int
     public let swigluLimit: Float
+    public let swigluAlpha: Float
 
-    public init(context: MetalContext, reader: ModelReader, swigluLimit: Float = 7.0) {
+    public init(context: MetalContext, reader: ModelReader,
+                swigluLimit: Float? = nil, swigluAlpha: Float? = nil) {
         self.context = context
         self.reader = reader
-        self.hiddenSize = reader.manifest.spec.hiddenSize
-        self.intermediateSize = reader.manifest.spec.intermediateSize
-        self.swigluLimit = swigluLimit
+        let spec = reader.manifest.spec
+        self.hiddenSize = spec.hiddenSize
+        self.intermediateSize = spec.intermediateSize
+        // Both are model properties, so the spec is the default source.
+        self.swigluLimit = swigluLimit ?? spec.activationLimit
+        self.swigluAlpha = swigluAlpha ?? spec.activationAlpha
     }
 
     /// Weights for one expert, already resident in GPU memory.
@@ -85,11 +90,13 @@ public struct ExpertRunner {
         }
         var width = UInt32(intermediateSize)
         var limit = swigluLimit
+        var alpha = swigluAlpha
         encoder.setComputePipelineState(activation)
         encoder.setBuffer(gateUpBuffer, offset: 0, index: 0)
         encoder.setBuffer(activated, offset: 0, index: 1)
         encoder.setBytes(&width, length: MemoryLayout<UInt32>.size, index: 2)
         encoder.setBytes(&limit, length: MemoryLayout<Float>.size, index: 3)
+        encoder.setBytes(&alpha, length: MemoryLayout<Float>.size, index: 4)
         encoder.dispatchThreads(MTLSize(width: intermediateSize, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()

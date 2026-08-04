@@ -41,6 +41,26 @@ struct DequantGEMVTests {
         #expect(error < 1e-3, "relative error \(error) too large at cols=2880")
     }
 
+    @Test("Head dimension is a specialisation constant, not a literal")
+    func headDimensionSpecialises() throws {
+        let context = try MetalContext()
+        // GPT-OSS uses 64, Qwen3 uses 128. Both must build; a hardcoded head
+        // dimension would silently compute the wrong thing on the second.
+        let sixtyFour = try context.pipeline(shader: "attention",
+                                             function: "gqa_attention_sinks",
+                                             constants: [0: 64])
+        let oneTwentyEight = try context.pipeline(shader: "attention",
+                                                  function: "gqa_attention_sinks",
+                                                  constants: [0: 128])
+        #expect(sixtyFour !== oneTwentyEight, "each value needs its own pipeline")
+
+        // Cached by value, so asking twice returns the same object.
+        let again = try context.pipeline(shader: "attention",
+                                         function: "gqa_attention_sinks",
+                                         constants: [0: 64])
+        #expect(again === sixtyFour)
+    }
+
     @Test("Reference decoder and GEMV reference agree on a hand case")
     func referenceConsistency() {
         // One block: code 2 (1.0) everywhere, scale 2^0, activations all 1.0.

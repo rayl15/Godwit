@@ -14,8 +14,20 @@ using namespace metal;
 // output it produces.
 
 constant constexpr uint kSimdWidth = 32;
-constant constexpr uint kHeadDim = 64;
-constant constexpr uint kPerLane = kHeadDim / kSimdWidth;   // 2
+
+// Head dimension is a specialisation constant, not a literal. GPT-OSS uses 64
+// and Qwen3 uses 128; hardcoding it is the kind of mistake that produces wrong
+// numbers rather than an error. Supplied at pipeline build time, so the loops
+// below still unroll against a compile-time value.
+constant uint FC_HEAD_DIM [[function_constant(0)]];
+inline uint headDimension() {
+    return is_function_constant_defined(FC_HEAD_DIM) ? FC_HEAD_DIM : 64u;
+}
+
+// Registers are sized for the largest head dimension we support; the loops run
+// to the actual one. A dynamically sized array is not available here.
+constant constexpr uint kMaxHeadDim = 256;
+constant constexpr uint kMaxPerLane = kMaxHeadDim / kSimdWidth;
 
 // One threadgroup of 32 lanes per (query position, head).
 //
@@ -41,11 +53,13 @@ kernel void gqa_attention_sinks(
     const uint head = group.y;
     const uint kvHead = head / (headCount / kvHeads);      // grouped-query
     const uint position = queryBase + queryIndex;
+    const uint headDim = headDimension();
+    const uint perLane = headDim / kSimdWidth;
 
-    device const half *q = queries + (queryIndex * headCount + head) * kHeadDim;
+    device const half *q = queries + (queryIndex * headCount + head) * headDim;
 
-    float accumulator[kPerLane];
-    for (uint i = 0; i < kPerLane; ++i) { accumulator[i] = 0.0f; }
+    float accumulator[kMaxPerLane];
+    for (uint i = 0; i < perLane; ++i) { accumulator[i] = 0.0f; }
     float runningMax = -INFINITY;
     float denominator = 0.0f;
 
@@ -58,9 +72,9 @@ kernel void gqa_attention_sinks(
         // Sliding layers store K/V in a ring: a window of 128 needs 128 slots,
         // not one per position, which is what keeps KV bounded at long context.
         const uint slot = (ring != 0) ? (key % ring) : key;
-        device const half *k = keys + (slot * kvHeads + kvHead) * kHeadDim;
+        device const half *k = keys + (slot * kvHeads + kvHead) * headDim;
         float partial = 0.0f;
-        for (uint i = 0; i < kPerLane; ++i) {
+        for (uint i = 0; i < perLane; ++i) {
             const uint index = lane + i * kSimdWidth;
             partial += float(q[index]) * float(k[index]);
         }
@@ -70,8 +84,8 @@ kernel void gqa_attention_sinks(
         const float rescale = exp(runningMax - updatedMax);
         const float weight = exp(score - updatedMax);
 
-        device const half *v = values + (slot * kvHeads + kvHead) * kHeadDim;
-        for (uint i = 0; i < kPerLane; ++i) {
+        device const half *v = values + (slot * kvHeads + kvHead) * headDim;
+        for (uint i = 0; i < perLane; ++i) {
             const uint index = lane + i * kSimdWidth;
             accumulator[i] = accumulator[i] * rescale + weight * float(v[index]);
         }
@@ -85,13 +99,13 @@ kernel void gqa_attention_sinks(
         const float sink = float(sinks[head]);
         const float updatedMax = max(runningMax, sink);
         const float rescale = exp(runningMax - updatedMax);
-        for (uint i = 0; i < kPerLane; ++i) { accumulator[i] *= rescale; }
+        for (uint i = 0; i < perLane; ++i) { accumulator[i] *= rescale; }
         denominator = denominator * rescale + exp(sink - updatedMax);
     }
 
     const float inverse = 1.0f / max(denominator, 1e-20f);
-    device half *destination = out + (queryIndex * headCount + head) * kHeadDim;
-    for (uint i = 0; i < kPerLane; ++i) {
+    device half *destination = out + (queryIndex * headCount + head) * headDim;
+    for (uint i = 0; i < perLane; ++i) {
         const uint index = lane + i * kSimdWidth;
         destination[index] = half(accumulator[i] * inverse);
     }
@@ -111,9 +125,10 @@ kernel void apply_rope(
 {
     const uint token = group.x;
     const uint head = group.y;
-    const uint half_ = kHeadDim / 2;
+    const uint headDim = headDimension();
+    const uint half_ = headDim / 2;
 
-    device half *vector = vectors + (token * headCount + head) * kHeadDim;
+    device half *vector = vectors + (token * headCount + head) * headDim;
     device const float *cosRow = cosines + token * half_;
     device const float *sinRow = sines + token * half_;
 
@@ -142,10 +157,11 @@ kernel void kv_cache_write(
     const uint head = group.y;
     const uint position = base + token;
     const uint slot = (ring != 0) ? (position % ring) : position;
+    const uint headDim = headDimension();
 
-    device const half *src = source + (token * kvHeads + head) * kHeadDim;
-    device half *dst = cache + (slot * kvHeads + head) * kHeadDim;
-    for (uint i = lane; i < kHeadDim; i += kSimdWidth) {
+    device const half *src = source + (token * kvHeads + head) * headDim;
+    device half *dst = cache + (slot * kvHeads + head) * headDim;
+    for (uint i = lane; i < headDim; i += kSimdWidth) {
         dst[i] = src[i];
     }
 }

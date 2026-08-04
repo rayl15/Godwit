@@ -133,6 +133,40 @@ NVMe straight into VRAM.
 Not a problem today, but the streaming interface should not assume zero-copy in
 its *shape*, so a future port is a new backend rather than a rewrite.
 
+## How model-specific is this?
+
+Structurally generic, practically single-model, and worth being precise about.
+
+| | Files | Lines |
+| --- | ---: | ---: |
+| Model-agnostic | 17 | 2,209 (78%) |
+| GPT-OSS-specific | 4 | 806 (22%) |
+
+The generic side is everything load-bearing: cache planner, streaming, MXFP4 and
+int8 codecs, `ModelReader`, `Router`, `KVCache`, `Attention`, `TransformerLayer`.
+These read dimensions from `ArchitectureSpec` and do not know what model they are
+running.
+
+What remains model-specific:
+
+- **Tensor names.** `Installer` and `InstallLayout` know that experts live at
+  `model.layers.N.mlp.experts.gate_up_proj_blocks`. Qwen3 names them differently
+  *and* stores them per-expert rather than stacked — and the second part matters
+  more, because "one expert is one contiguous byte range" depends on expert being
+  the leading dimension.
+- **RoPE scaling.** YaRN only; no linear, NTK, or unscaled variant.
+- **Quantisation assumption.** MXFP4 experts with a BF16 trunk.
+
+Two constants that *were* hardcoded are now parameters: head dimension is a
+Metal function constant (64 for GPT-OSS, 128 for Qwen3), and the activation's
+alpha and clamp come from the spec. Both were the dangerous kind of hardcoding —
+a wrong head dimension computes confidently wrong numbers rather than failing.
+
+**Deliberately not generalised further yet.** Abstracting against one example
+produces the wrong abstraction; a second model would show what actually varies
+rather than what we imagine does. GPT-OSS-20B is the obvious candidate — same
+family, different dimensions, and small enough to run alongside for comparison.
+
 ## Numerical precision
 
 Activations are FP16 throughout: q, k, v, the attention output, and the residual

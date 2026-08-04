@@ -31,8 +31,7 @@ public struct TransformerLayer {
                              expertCount: spec.layers[index].routedExpertCount,
                              hiddenSize: spec.hiddenSize,
                              topK: spec.layers[index].expertsPerToken)
-        self.experts = ExpertRunner(context: context, reader: reader,
-                                    swigluLimit: spec.activationLimit)
+        self.experts = ExpertRunner(context: context, reader: reader)
     }
 
     /// Resident weights for this layer. Attention plus the two norms and the

@@ -74,8 +74,19 @@ public final class MetalContext {
     }
 
     /// Returns a compute pipeline for `function` in `<shader>.metal`, cached.
-    public func pipeline(shader: String, function: String) throws -> MTLComputePipelineState {
-        let key = "\(shader).\(function)"
+    ///
+    /// `constants` are Metal function constants — specialisation values baked in
+    /// at pipeline build time. They are how a kernel stays model-agnostic
+    /// without paying for it: a head dimension supplied this way is a compile
+    /// time constant to the shader compiler, so loops still unroll, where the
+    /// same value passed in a buffer would not.
+    public func pipeline(
+        shader: String, function: String, constants: [Int: Int] = [:]
+    ) throws -> MTLComputePipelineState {
+        let key = constants.isEmpty
+            ? "\(shader).\(function)"
+            : "\(shader).\(function)[" + constants.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: ",") + "]"
         lock.lock()
         if let cached = pipelines[key] {
             lock.unlock()
@@ -84,8 +95,19 @@ public final class MetalContext {
         lock.unlock()
 
         let library = try library(named: shader)
-        guard let kernel = library.makeFunction(name: function) else {
-            throw MetalError.functionNotFound(shader: shader, function: function)
+        let kernel: MTLFunction
+        if constants.isEmpty {
+            guard let plain = library.makeFunction(name: function) else {
+                throw MetalError.functionNotFound(shader: shader, function: function)
+            }
+            kernel = plain
+        } else {
+            let values = MTLFunctionConstantValues()
+            for (index, value) in constants {
+                var scalar = UInt32(value)
+                values.setConstantValue(&scalar, type: .uint, index: index)
+            }
+            kernel = try library.makeFunction(name: function, constantValues: values)
         }
         let state = try device.makeComputePipelineState(function: kernel)
 

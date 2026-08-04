@@ -91,6 +91,9 @@ func runInstall(directory: String, layerLimit: Int?) async {
             print(String(format: "  %-8@ %3d/%-3d  %7.2f GiB",
                          progress.stage as NSString,
                          progress.completed, progress.total, gib))
+            // An install runs for hours and is usually redirected to a file,
+            // where Swift buffers stdout and the progress never appears.
+            fflush(stdout)
         }
         try manifest.validate(at: target)
 

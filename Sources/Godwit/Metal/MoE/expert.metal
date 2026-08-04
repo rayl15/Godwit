@@ -9,14 +9,14 @@ using namespace metal;
 //   1. gate and up are INTERLEAVED in the gate_up output, not stored as two
 //      halves. gate = out[0::2], up = out[1::2].
 //   2. The activation is not SiLU despite `hidden_act: "silu"` in config.json.
-//      It is (up + 1) * gate * sigmoid(alpha * gate) with alpha = 1.702 -- a
-//      GELU-style sigmoid gate, with a +1 shift on the up branch.
+//      It is (up + 1) * gate * sigmoid(alpha * gate) -- a GELU-style sigmoid
+//      gate, with a +1 shift on the up branch. Alpha and the clamp arrive as
+//      parameters rather than literals, since they are model properties.
 //   3. Clamping is asymmetric: gate is clamped above only, up on both sides.
 //
 // Source of truth: transformers' GptOssExperts.forward.
 
 constant constexpr uint kSimdWidth = 32;
-constant constexpr float kSwigluAlpha = 1.702f;
 
 inline float mxfp4_code_to_float(uint code) {
     const float magnitude[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
@@ -72,6 +72,7 @@ kernel void gptoss_expert_activation(
     device half        *out     [[buffer(1)]],   // F
     constant uint      &width   [[buffer(2)]],   // F
     constant float     &limit   [[buffer(3)]],   // swiglu_limit, 7.0
+    constant float     &alpha   [[buffer(4)]],   // sigmoid steepness, 1.702
     uint                index   [[thread_position_in_grid]])
 {
     if (index >= width) { return; }
@@ -84,7 +85,7 @@ kernel void gptoss_expert_activation(
     gate = min(gate, limit);
     up = clamp(up, -limit, limit);
 
-    const float glu = gate * (1.0f / (1.0f + exp(-kSwigluAlpha * gate)));
+    const float glu = gate * (1.0f / (1.0f + exp(-alpha * gate)));
     out[index] = half((up + 1.0f) * glu);
 }
 

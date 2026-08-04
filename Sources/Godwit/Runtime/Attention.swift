@@ -102,7 +102,8 @@ public struct Attention {
 
         // Attend.
         let attended = try context.emptyBuffer(of: Float16.self, count: tokenCount * qWidth)
-        let pipeline = try context.pipeline(shader: "attention", function: "gqa_attention_sinks")
+        let pipeline = try context.pipeline(shader: "attention", function: "gqa_attention_sinks",
+                                            constants: [0: spec.headDimension])
         guard let commands = context.queue.makeCommandBuffer(),
               let encoder = commands.makeComputeCommandEncoder()
         else { throw MetalError.encoderCreationFailed }
@@ -203,7 +204,8 @@ public struct Attention {
         _ vectors: MTLBuffer, tokens: Int, heads: Int,
         cosines: MTLBuffer, sines: MTLBuffer
     ) throws {
-        let pipeline = try context.pipeline(shader: "attention", function: "apply_rope")
+        let pipeline = try context.pipeline(shader: "attention", function: "apply_rope",
+                                            constants: [0: spec.headDimension])
         guard let commands = context.queue.makeCommandBuffer(),
               let encoder = commands.makeComputeCommandEncoder()
         else { throw MetalError.encoderCreationFailed }

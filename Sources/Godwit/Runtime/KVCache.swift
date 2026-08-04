@@ -74,7 +74,8 @@ public final class KVCache {
         keys: MTLBuffer, values: MTLBuffer, layer: Int, position: Int, tokenCount: Int
     ) throws {
         let cache = layers[layer]
-        let pipeline = try context.pipeline(shader: "attention", function: "kv_cache_write")
+        let pipeline = try context.pipeline(shader: "attention", function: "kv_cache_write",
+                                            constants: [0: spec.headDimension])
 
         for (source, destination) in [(keys, cache.keys), (values, cache.values)] {
             guard let commands = context.queue.makeCommandBuffer(),
