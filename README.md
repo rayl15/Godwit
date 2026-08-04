@@ -64,7 +64,10 @@ What exists:
 - **`ExpertRunner`** — a complete expert forward pass on GPU from an installed
   model, verified against NumPy to ~1e-5 across experts 0, 17, 64 and 127
 
-Not started: attention, KV cache, router, tokenizer, sampling.
+- `Router` — top-4 selection with softmax over the selection only
+- `RoutingTrace` — measures real router skew and replays it through the planner
+
+Not started: attention, KV cache, tokenizer, sampling.
 
 ### Installing
 

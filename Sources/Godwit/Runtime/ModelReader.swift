@@ -91,3 +91,55 @@ public final class ModelReader {
         return buffer
     }
 }
+
+extension ModelReader {
+    /// Reads a named trunk section into GPU-visible memory.
+    ///
+    /// The trunk is small and resident, so unlike experts these are read once at
+    /// load time. Still `pread` rather than `mmap`, for the same reason: we want
+    /// to decide when the read happens.
+    public func loadTrunk(section name: String, device: MTLDevice) throws -> MTLBuffer {
+        guard let section = manifest.trunkSections.first(where: { $0.name == name }) else {
+            throw ExpertBlobError.missingSection(name)
+        }
+        let path = directory.appendingPathComponent("trunk.bin").path
+        let fd = open(path, O_RDONLY)
+        guard fd >= 0 else { throw ExpertBlobError.openFailed(path: path, errno: errno) }
+        defer { close(fd) }
+
+        let pageSize = Int(getpagesize())
+        let allocation = (section.length + pageSize - 1) / pageSize * pageSize
+        var raw: UnsafeMutableRawPointer?
+        guard posix_memalign(&raw, pageSize, allocation) == 0, let pointer = raw else {
+            throw ExpertBlobError.allocationFailed(bytes: allocation)
+        }
+
+        var filled = 0
+        while filled < section.length {
+            let got = pread(fd, pointer.advanced(by: filled),
+                            section.length - filled, off_t(section.offset + filled))
+            if got <= 0 {
+                free(pointer)
+                throw ExpertBlobError.readFailed(section: name, errno: errno)
+            }
+            filled += got
+        }
+
+        nonisolated(unsafe) let owned = pointer
+        guard let buffer = device.makeBuffer(bytesNoCopy: pointer, length: allocation,
+                                             options: .storageModeShared,
+                                             deallocator: { _, _ in free(owned) })
+        else {
+            free(pointer)
+            throw ExpertBlobError.bufferWrapFailed
+        }
+        return buffer
+    }
+
+    public func trunkShape(_ name: String) throws -> [Int] {
+        guard let section = manifest.trunkSections.first(where: { $0.name == name }) else {
+            throw ExpertBlobError.missingSection(name)
+        }
+        return section.shape
+    }
+}

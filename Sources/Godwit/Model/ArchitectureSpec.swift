@@ -145,6 +145,35 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
     public var maxExpertsPerToken: Int {
         layers.map(\.expertsPerToken).max() ?? 0
     }
+
+    /// Decoding tolerates manifests written before a field existed.
+    ///
+    /// An installation is expensive — hours of transfer and tens of gigabytes —
+    /// so adding a spec field must not invalidate one that is already on disk.
+    /// Defaults here match the behaviour of the version that lacked the field.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        hiddenSize = try container.decode(Int.self, forKey: .hiddenSize)
+        intermediateSize = try container.decode(Int.self, forKey: .intermediateSize)
+        attentionHeads = try container.decode(Int.self, forKey: .attentionHeads)
+        keyValueHeads = try container.decode(Int.self, forKey: .keyValueHeads)
+        headDimension = try container.decode(Int.self, forKey: .headDimension)
+        vocabularySize = try container.decode(Int.self, forKey: .vocabularySize)
+        ropeTheta = try container.decode(Float.self, forKey: .ropeTheta)
+        rmsNormEpsilon = try container.decode(Float.self, forKey: .rmsNormEpsilon)
+        activation = try container.decode(FeedForwardActivation.self, forKey: .activation)
+        logitSoftcap = try container.decodeIfPresent(Float.self, forKey: .logitSoftcap)
+        tiedEmbedding = try container.decode(Bool.self, forKey: .tiedEmbedding)
+        layers = try container.decode([LayerSpec].self, forKey: .layers)
+
+        attentionSinks = try container.decodeIfPresent(Bool.self, forKey: .attentionSinks) ?? false
+        attentionBias = try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
+        expertBias = try container.decodeIfPresent(Bool.self, forKey: .expertBias) ?? false
+        routerBias = try container.decodeIfPresent(Bool.self, forKey: .routerBias) ?? false
+        activationLimit = try container.decodeIfPresent(Float.self, forKey: .activationLimit) ?? 7.0
+        activationAlpha = try container.decodeIfPresent(Float.self, forKey: .activationAlpha) ?? 1.702
+    }
 }
 
 extension ArchitectureSpec {

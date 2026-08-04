@@ -3,7 +3,7 @@
 Answers open question #2 in [DESIGN.md](DESIGN.md): what throughput does a 30:1
 stream-to-resident ratio actually produce?
 
-**Verdict: decode is viable at 3-5 tok/s. Prefill costs a full pass over the
+**Verdict: decode is viable at 3.0-4.4 tok/s on measured routing. Prefill costs a full pass over the
 routed pool per chunk, which makes chunk size the single most important
 parameter in the system.**
 
@@ -83,23 +83,42 @@ percentages.
 KV is cheap because the sliding window is only 128 tokens: **0.29 GiB at 8K
 context**, 1.13 GiB at 32K.
 
-## Cache hit rates
+## Cache hit rates — measured
 
-Simulated with Godwit's LFU-plus-LRU policy, one independent cache per layer,
-Zipf-distributed expert popularity drawn independently per layer.
+Originally simulated with a Zipf exponent calibrated against TurboFieldfare's
+published 166 → 88 ms/token. That was the weakest input in this document, and
+`godwit trace-routing` has now replaced it with GPT-OSS's real router driving
+Godwit's real planner over 3,000 tokens.
 
-The Zipf exponent is the one free parameter, so it is **calibrated against a
-published measurement** rather than guessed: TurboFieldfare reports expert I/O
-falling 166 → 88 ms/token at 16 slots with top-8 of 128, a 47% hit rate.
-That fits α = 0.90.
+**The real router is less cacheable than the Zipf model predicted**, by roughly
+a third at every slot count:
 
-| Slots/layer | Cache RAM | Hit rate | Reads/token |
-| ---: | ---: | ---: | ---: |
-| 4 | 1.77 GiB | 13.6% | 124.4 |
-| 6 | 2.66 GiB | 27.7% | 104.1 |
-| 8 | 3.55 GiB | 35.5% | 92.9 |
-| 12 | 5.32 GiB | 45.3% | 78.8 |
-| 16 | 7.09 GiB | 51.6% | 69.7 |
+| Slots/layer | Cache RAM | Zipf estimate | **Measured** | Reads/token |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 1.77 GiB | 13.6% | **8.3%** | 132.0 |
+| 6 | 2.66 GiB | 27.7% | **18.1%** | 117.9 |
+| 8 | 3.55 GiB | 35.5% | **24.8%** | 108.3 |
+| 12 | 5.32 GiB | 45.3% | **33.5%** | 95.8 |
+| 16 | 7.09 GiB | 51.6% | **39.0%** | 87.8 |
+
+The router is close to balanced, which is what a load-balancing training loss is
+supposed to produce: normalised entropy 0.912 against 1.0 for uniform, and **not
+one of the 128 experts went unused**. But it is not flat — the top decile takes
+36.6% of all selections against 10% for uniform, and expert 12 alone was chosen
+11× more often than the mean. That residual skew is what the cache lives on.
+
+**Two limitations, and they push in opposite directions.**
+
+Hidden states here are normalised token embeddings, not `norm(residual +
+attention)`, because attention is not implemented yet. Real states carry
+contextual structure this does not reproduce.
+
+Against that, the trace samples token ids strided across the whole vocabulary,
+which is close to maximally decorrelated. Real text has strong temporal
+locality — consecutive tokens share context, so their hidden states and
+therefore their expert choices should correlate. **That makes these numbers
+most likely a lower bound**, and re-measuring on a real forward pass is the
+obvious next refinement.
 
 ## Decode
 
@@ -107,13 +126,13 @@ Assumes 8-thread read bandwidth, and that overlap hides only half the compute �
 **GPT-OSS has no shared-expert branch**, so there is less resident GPU work to
 hide reads behind than TurboFieldfare had.
 
-| Slots | Total RAM | I/O time | Compute | tok/s |
-| ---: | ---: | ---: | ---: | ---: |
-| 4 | 4.17 GiB | 301 ms | 27 ms | **3.17** |
-| 6 | 5.06 GiB | 252 ms | 27 ms | **3.76** |
-| 8 | 5.95 GiB | 225 ms | 27 ms | **4.19** |
-| 12 | 7.72 GiB | 191 ms | 27 ms | **4.89** |
-| 16 | 9.49 GiB | 169 ms | 27 ms | **5.48** |
+| Slots | Total RAM | I/O time | Compute | tok/s (Zipf) | **tok/s (measured)** |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 4.17 GiB | 320 ms | 27 ms | 3.17 | **3.00** |
+| 6 | 5.06 GiB | 286 ms | 27 ms | 3.76 | **3.34** |
+| 8 | 5.95 GiB | 262 ms | 27 ms | 4.19 | **3.62** |
+| 12 | 7.72 GiB | 232 ms | 27 ms | 4.89 | **4.07** |
+| 16 | 9.49 GiB | 213 ms | 27 ms | 5.48 | **4.42** |
 
 8-12 slots is the sweet spot: 6.0-7.7 GiB total leaves real headroom on a 16 GB
 machine, and the returns above 12 slots are thin. Throughput is unchanged by the

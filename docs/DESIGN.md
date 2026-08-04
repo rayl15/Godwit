@@ -55,6 +55,7 @@ higher and some conclusions may not transfer.
 | `pread` beats `mmap` for cold experts | 2.79 ms vs 9.88 ms; 3.97 vs 0.50 tok/s end-to-end | Explicit reads from day one. Do not revisit. |
 | Persistent workgroups beat SIMD-cooperative MoE | routed phase 239 → 60 ms; decode +51% | Start with persistent-workgroup dispatch. |
 | LFU beats LRU for expert eviction | 72.6 → 64.8 ms/token | Implemented in `ExpertCachePlanner`. |
+| Zipf-modelled routing skew | fitted α = 0.90 | **Superseded.** GPT-OSS's real router is ~⅓ less cacheable; see [ESTIMATE.md](ESTIMATE.md). |
 | Bounded slot cache pays for itself | 166 → 88 ms/token at 16 slots/layer | Slot count is a tuning knob, default 16. |
 | Coarse overlap beats fine-grained | 4.404 → 4.736 tok/s coarse; 4.799 → 4.648 fine | One batch per layer. Resist cleverness. |
 | Cross-layer expert prediction does not work | 7% hit rate predicting next layer from current | Do not build speculative prefetch. |

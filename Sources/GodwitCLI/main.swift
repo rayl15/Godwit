@@ -158,6 +158,35 @@ func runExpertCheck(model: String, reference: String) {
     }
 }
 
+func runRoutingTrace(model: String, layer: Int, tokens: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let report = try RoutingTrace(context: context, reader: reader)
+            .run(layer: layer, tokenCount: tokens)
+
+        print("layer \(layer): \(report.tokensRouted) tokens, top-\(report.topK) of \(report.expertCount)\n")
+        print(String(format: "top-decile share   %.1f%%   (10.0%% would be uniform)",
+                     report.topDecileShare * 100))
+        print(String(format: "normalised entropy %.3f    (1.000 would be uniform)",
+                     report.normalisedEntropy))
+        print("experts never used \(report.unusedExperts) of \(report.expertCount)\n")
+
+        print("slots  hit rate   reads/token (36 layers)")
+        for entry in report.hitRates {
+            let reads = Double(report.topK * 36) * (1 - entry.rate)
+            print(String(format: "%5d   %6.1f%%   %6.1f", entry.slots, entry.rate * 100, reads))
+        }
+
+        let sorted = report.selectionCounts.enumerated().sorted { $0.element > $1.element }
+        let hottest = sorted.prefix(5).map { "\($0.offset)(\($0.element))" }.joined(separator: " ")
+        print("\nhottest experts: \(hottest)")
+    } catch {
+        FileHandle.standardError.write(Data("routing trace failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -184,6 +213,27 @@ case "install":
         exit(2)
     }
     await runInstall(directory: target, layerLimit: limit)
+case "trace-routing":
+    var model: String?
+    var layer = 0
+    var tokens = 2000
+    var flags = arguments.dropFirst().makeIterator()
+    while let flag = flags.next() {
+        switch flag {
+        case "--model", "-m": model = flags.next()
+        case "--layer": layer = flags.next().flatMap(Int.init) ?? 0
+        case "--tokens": tokens = flags.next().flatMap(Int.init) ?? 2000
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    guard let model else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit trace-routing --model <dir> [--layer N] [--tokens N]\n".utf8))
+        exit(2)
+    }
+    runRoutingTrace(model: model, layer: layer, tokens: tokens)
 case "check-expert":
     let rest = Array(arguments.dropFirst())
     guard rest.count == 2 else {
@@ -213,5 +263,6 @@ case nil:
       verify-expert    check the Metal kernel against real GPT-OSS weights
       install          stream and repack the checkpoint into a .gwt directory
       check-expert     run one installed expert and compare against a reference
+      trace-routing    measure real router skew and resulting cache hit rates
     """)
 }
