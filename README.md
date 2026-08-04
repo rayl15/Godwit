@@ -153,17 +153,42 @@ Try the pipeline without the full transfer by installing a single layer:
 
 Per token, per layer:
 
-```
-attention + router          resident weights, ~26M parameters
-plan top-4 against cache    pure CPU, no I/O
-dispatch cached experts  ─┐ overlapped
-fetch missing experts    ─┘ ~12.6 MiB each
-combine routed outputs
+```mermaid
+flowchart TD
+    A["<b>1 · New token</b>"]
+    B["<b>2 · Attention + router</b><br/>resident · ~26M parameters"]
+    C["<b>3 · Plan top-4</b><br/>pure CPU · no I/O"]
+    D["<b>4a · Cached experts</b><br/>already resident · dispatch now"]
+    E["<b>4b · Missing experts</b><br/>~12.6 MiB each, from SSD"]
+    F["<b>5 · Combine routed outputs</b><br/>weighted by router scores"]
+    G["<b>6 · Next layer</b><br/>×36, then the output head"]
+
+    A --> B
+    B --> C
+    C --> D
+    C --> E
+    D --> F
+    E -. "overlapped" .-> F
+    F --> G
+
+    classDef resident fill:#1a2733,stroke:#4a9eda,stroke-width:2px,color:#e8e6e3
+    classDef cpu fill:#26231f,stroke:#8b8783,stroke-width:2px,color:#e8e6e3
+    classDef hit fill:#1a2b1e,stroke:#6dc46d,stroke-width:2px,color:#e8e6e3
+    classDef miss fill:#2b1d12,stroke:#d98b4a,stroke-width:2px,color:#e8e6e3
+    classDef exec fill:#241a2b,stroke:#b07fd9,stroke-width:2px,color:#e8e6e3
+
+    class A,B,G resident
+    class C cpu
+    class D hit
+    class E miss
+    class F exec
 ```
 
-The asymmetry between those two halves is the entire project. One touches
-resident weights; the other selects 4 of 128 experts and pulls roughly 50 MiB
-off disk to do it.
+The asymmetry between steps 2 and 4 is the entire project. Attention touches
+resident weights that never move; the expert branch selects 4 of 128 and pulls
+roughly 50 MiB off disk to do it. Multiply by 36 layers and a token costs about
+1.2 GiB of reads — which is why the design is bound by storage rather than by
+arithmetic, and why the GPU sits idle 82% of the time.
 
 - **[docs/DESIGN.md](docs/DESIGN.md)** — architecture, the `.gwt` layout,
   numerical precision, how to benchmark on a thermally unstable machine, and
