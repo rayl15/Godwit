@@ -78,6 +78,103 @@ public struct ExpertRunner {
         return Weights(buffer: buffer, offsets: sectionOffsets)
     }
 
+    /// One expert's work for one token.
+    public struct Assignment {
+        public let weights: Weights
+        public let token: Int
+        public let routingWeight: Float
+
+        public init(weights: Weights, token: Int, routingWeight: Float) {
+            self.weights = weights
+            self.token = token
+            self.routingWeight = routingWeight
+        }
+    }
+
+    /// Applies many (expert, token) pairs in one submission, accumulating into
+    /// per-token outputs.
+    ///
+    /// This is what makes an expert fetched once serve every token routed to
+    /// it. Iterating tokens and fetching four experts each re-reads the same
+    /// 12.66 MiB blob several times in a single forward pass — for a 23-token
+    /// prompt that is 92 reads per layer where roughly 25 unique experts would
+    /// do.
+    public func applyAssignments(
+        inputs: MTLBuffer, assignments: [Assignment], outputs: MTLBuffer
+    ) throws {
+        guard !assignments.isEmpty else { return }
+        let gateUpRows = 2 * intermediateSize
+
+        let gemv = try context.pipeline(
+            shader: "expert",
+            function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
+        let activation = try context.pipeline(shader: "expert",
+                                              function: "gptoss_expert_activation")
+        let accumulate = try context.pipeline(shader: "expert", function: "expert_accumulate")
+
+        guard let commands = context.queue.makeCommandBuffer() else {
+            throw MetalError.encoderCreationFailed
+        }
+
+        for assignment in assignments {
+            // Fresh scratch per assignment: encoders in one command buffer run
+            // in order, but reusing scratch would be a write-after-read hazard
+            // the ordering does not resolve.
+            let gateUp = try context.emptyBuffer(of: Float.self, count: gateUpRows)
+            let activated = try context.emptyBuffer(of: Float16.self, count: intermediateSize)
+            let output = try context.emptyBuffer(of: Float.self, count: hiddenSize)
+            let inputOffset = assignment.token * hiddenSize * MemoryLayout<Float16>.stride
+
+            try encodeGEMV(commands, pipeline: gemv, source: assignment.weights.buffer,
+                           blocksOffset: assignment.weights.offset(.gateUpBlocks),
+                           scalesOffset: assignment.weights.offset(.gateUpScales),
+                           biasOffset: assignment.weights.offset(.gateUpBias),
+                           x: inputs, xOffset: inputOffset, y: gateUp,
+                           rows: gateUpRows, cols: hiddenSize)
+
+            guard let encoder = commands.makeComputeCommandEncoder() else {
+                throw MetalError.encoderCreationFailed
+            }
+            var width = UInt32(intermediateSize)
+            var limit = swigluLimit
+            var alpha = swigluAlpha
+            encoder.setComputePipelineState(activation)
+            encoder.setBuffer(gateUp, offset: 0, index: 0)
+            encoder.setBuffer(activated, offset: 0, index: 1)
+            encoder.setBytes(&width, length: 4, index: 2)
+            encoder.setBytes(&limit, length: 4, index: 3)
+            encoder.setBytes(&alpha, length: 4, index: 4)
+            encoder.dispatchThreads(MTLSize(width: intermediateSize, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            encoder.endEncoding()
+
+            try encodeGEMV(commands, pipeline: gemv, source: assignment.weights.buffer,
+                           blocksOffset: assignment.weights.offset(.downBlocks),
+                           scalesOffset: assignment.weights.offset(.downScales),
+                           biasOffset: assignment.weights.offset(.downBias),
+                           x: activated, xOffset: 0, y: output,
+                           rows: hiddenSize, cols: intermediateSize)
+
+            guard let combiner = commands.makeComputeCommandEncoder() else {
+                throw MetalError.encoderCreationFailed
+            }
+            var scale = assignment.routingWeight
+            var count = UInt32(hiddenSize)
+            combiner.setComputePipelineState(accumulate)
+            combiner.setBuffer(output, offset: 0, index: 0)
+            combiner.setBuffer(outputs,
+                               offset: assignment.token * hiddenSize * MemoryLayout<Float>.stride,
+                               index: 1)
+            combiner.setBytes(&scale, length: 4, index: 2)
+            combiner.setBytes(&count, length: 4, index: 3)
+            combiner.dispatchThreads(MTLSize(width: hiddenSize, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            combiner.endEncoding()
+        }
+
+        context.run("experts", commands)
+    }
+
     /// Applies every selected expert to one token, in a single submission.
     ///
     /// The routed outputs are combined on the GPU by `expert_accumulate`, so
@@ -230,7 +327,7 @@ public struct ExpertRunner {
     private func encodeGEMV(
         _ commands: MTLCommandBuffer, pipeline: MTLComputePipelineState,
         source: MTLBuffer, blocksOffset: Int, scalesOffset: Int, biasOffset: Int,
-        x: MTLBuffer, y: MTLBuffer, rows: Int, cols: Int
+        x: MTLBuffer, xOffset: Int = 0, y: MTLBuffer, rows: Int, cols: Int
     ) throws {
         guard let encoder = commands.makeComputeCommandEncoder() else {
             throw MetalError.encoderCreationFailed
@@ -241,7 +338,7 @@ public struct ExpertRunner {
         encoder.setBuffer(source, offset: blocksOffset, index: 0)
         encoder.setBuffer(source, offset: scalesOffset, index: 1)
         encoder.setBuffer(source, offset: biasOffset, index: 2)
-        encoder.setBuffer(x, offset: 0, index: 3)
+        encoder.setBuffer(x, offset: xOffset, index: 3)
         encoder.setBuffer(y, offset: 0, index: 4)
         encoder.setBytes(&colsValue, length: MemoryLayout<UInt32>.size, index: 5)
 

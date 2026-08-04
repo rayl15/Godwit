@@ -89,96 +89,89 @@ public struct TransformerLayer {
             try normalise(stream, tokenCount: tokenCount, weight: weights.postNorm)
         }
 
+        // Route every token first, then do the expert work grouped by expert.
+        //
+        // The order matters more than it looks. Iterating tokens and fetching
+        // their four experts each re-reads the same 12.66 MiB blob whenever two
+        // tokens share an expert — and adjacent tokens share 54% of theirs. For
+        // a 23-token prompt that was 92 reads per layer where ~25 unique
+        // experts would do, which is why prefill was no faster per token than
+        // decoding one at a time.
         var decisions: [Router.Decision] = []
         decisions.reserveCapacity(tokenCount)
-        // Fallback for callers without a persistent cache: reuse within this
-        // batch only. An expert is ~12.6 MiB, so even that is worth doing.
-        var local: [Int: ExpertRunner.Weights] = [:]
-        let offsets = experts.sectionOffsets
-
         for token in 0..<tokenCount {
             let slice = Array(normed[(token * width)..<((token + 1) * width)])
-            let decision = try router.route(hidden: slice,
-                                            weight: weights.routerWeight,
-                                            bias: weights.routerBias)
-            decisions.append(decision)
+            decisions.append(try router.route(hidden: slice,
+                                              weight: weights.routerWeight,
+                                              bias: weights.routerBias))
+        }
 
-            // Ask for all of this token's experts at once, so the planner sees
-            // the whole working set and never evicts one it is about to need.
-            var resolved: [ExpertRunner.Weights] = []
-            if let expertCache, !Self.overlapDisabled {
-                // Coarse overlap: miss reads start immediately and the GPU runs
-                // the resident experts while they are in flight. Their outputs
-                // are summed, so splitting the batch changes only the addition
-                // order — FP16-noise, checked by the layer regression test.
-                let unique = Array(Set(decision.experts))
-                let acquisition = expertCache.acquireAsync(layer: index, experts: unique)
-                var slotByExpert: [Int: Int] = [:]
-                var expertIsMiss: [Int: Bool] = [:]
-                for (position, expert) in unique.enumerated() {
-                    slotByExpert[expert] = acquisition.slots[position]
-                    expertIsMiss[expert] = acquisition.missPositions.contains(position)
-                }
+        let offsets = experts.sectionOffsets
+        let normedBuffer = try context.buffer(normed)
+        let accumulated = try context.emptyBuffer(of: Float.self, count: tokenCount * width)
 
-                var hitPairs: [(ExpertRunner.Weights, Float)] = []
-                var missPairs: [(ExpertRunner.Weights, Float)] = []
-                for (position, expert) in decision.experts.enumerated() {
-                    let weights = ExpertRunner.Weights(
-                        buffer: expertCache.buffer(layer: index, slot: slotByExpert[expert]!),
+        // expert -> the tokens that chose it, with their routing weights
+        var demand: [Int: [(token: Int, weight: Float)]] = [:]
+        for (token, decision) in decisions.enumerated() {
+            for (position, expert) in decision.experts.enumerated() {
+                demand[expert, default: []].append((token, decision.weights[position]))
+            }
+        }
+
+        if let expertCache {
+            // Only `slotCount` experts can be resident at once, so the unique
+            // set is processed in groups that fit. Sorting by demand puts the
+            // most-shared experts first, which costs nothing and keeps the
+            // busiest ones together.
+            let ordered = demand.keys.sorted {
+                let left = demand[$0]!.count, right = demand[$1]!.count
+                return left == right ? $0 < $1 : left > right
+            }
+            for group in stride(from: 0, to: ordered.count, by: expertCache.slotCount) {
+                let chunk = Array(ordered[group..<min(group + expertCache.slotCount,
+                                                      ordered.count)])
+                // Start the misses reading, then run the experts already
+                // resident while those are in flight. Reads are the majority of
+                // decode, so any compute moved underneath them is free.
+                let acquisition = expertCache.acquireAsync(layer: index, experts: chunk)
+                var hits: [ExpertRunner.Assignment] = []
+                var misses: [ExpertRunner.Assignment] = []
+                for (position, expert) in chunk.enumerated() {
+                    let expertWeights = ExpertRunner.Weights(
+                        buffer: expertCache.buffer(layer: index, slot: acquisition.slots[position]),
                         offsets: offsets)
-                    if expertIsMiss[expert] == true {
-                        missPairs.append((weights, decision.weights[position]))
-                    } else {
-                        hitPairs.append((weights, decision.weights[position]))
+                    let target = acquisition.missPositions.contains(position)
+                    for entry in demand[expert]! {
+                        let assignment = ExpertRunner.Assignment(
+                            weights: expertWeights, token: entry.token,
+                            routingWeight: entry.weight)
+                        if target { misses.append(assignment) } else { hits.append(assignment) }
                     }
                 }
-
-                let hitOutput = try experts.applyBatch(slice, experts: hitPairs)
+                try experts.applyAssignments(inputs: normedBuffer, assignments: hits,
+                                             outputs: accumulated)
                 try acquisition.wait()
-                let missOutput = try experts.applyBatch(slice, experts: missPairs)
-
-                var combined = [Float](repeating: 0, count: width)
-                for i in 0..<width { combined[i] = hitOutput[i] + missOutput[i] }
-
-                timed("cpu:residual") {
-                    for i in 0..<width {
-                        stream[token * width + i] = Float16(
-                            Float(stream[token * width + i]) + combined[i])
-                    }
-                }
-                continue
+                try experts.applyAssignments(inputs: normedBuffer, assignments: misses,
+                                             outputs: accumulated)
             }
-            if let expertCache {
-                let unique = Array(Set(decision.experts))
-                let slots = try expertCache.acquire(layer: index, experts: unique)
-                var slotByExpert: [Int: Int] = [:]
-                for (expert, slot) in zip(unique, slots) { slotByExpert[expert] = slot }
-                resolved = decision.experts.map { expert in
-                    ExpertRunner.Weights(
-                        buffer: expertCache.buffer(layer: index, slot: slotByExpert[expert]!),
-                        offsets: offsets)
-                }
-            } else {
-                for expert in decision.experts {
-                    if let cached = local[expert] {
-                        resolved.append(cached)
-                    } else {
-                        let loaded = try experts.loadWeights(layer: index, expert: expert)
-                        local[expert] = loaded
-                        resolved.append(loaded)
-                    }
-                }
+        } else {
+            for (expert, entries) in demand {
+                let expertWeights = try experts.loadWeights(layer: index, expert: expert)
+                try experts.applyAssignments(
+                    inputs: normedBuffer,
+                    assignments: entries.map {
+                        ExpertRunner.Assignment(weights: expertWeights, token: $0.token,
+                                                routingWeight: $0.weight)
+                    },
+                    outputs: accumulated)
             }
+        }
 
-            let combined = try experts.applyBatch(
-                slice,
-                experts: resolved.enumerated().map { ($1, decision.weights[$0]) })
-
-            timed("cpu:residual") {
-                for i in 0..<width {
-                    stream[token * width + i] = Float16(
-                        Float(stream[token * width + i]) + combined[i])
-                }
+        timed("cpu:residual") {
+            let combined = accumulated.contents().bindMemory(
+                to: Float.self, capacity: tokenCount * width)
+            for i in 0..<(tokenCount * width) {
+                stream[i] = Float16(Float(stream[i]) + combined[i])
             }
         }
 
