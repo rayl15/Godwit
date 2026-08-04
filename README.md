@@ -29,9 +29,24 @@ the model at all. The bet is that "slow" beats "impossible."
 
 ## Status
 
-**Pre-alpha. Nothing runs yet.** Currently in the ground-truth and
-feasibility-check stage. See [docs/DESIGN.md](docs/DESIGN.md) for the
-architecture and the open questions.
+**Pre-alpha — no inference yet, but the foundations are verified against real
+weights.** See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and
+[docs/ESTIMATE.md](docs/ESTIMATE.md) for the measured feasibility case.
+
+Verified end to end on an M4: one expert pulled from the real GPT-OSS-120B
+checkpoint by HTTP range request, written in Godwit's blob layout, read back
+with `pread` into GPU-visible memory, and multiplied by the Metal kernel —
+matching a NumPy reference to **7.2e-07** relative error.
+
+```
+$ godwit verify-expert scratch/expert-l0-e0
+expert  5760 x 2880
+read    8.40 MiB in 3.2 ms (2.56 GiB/s)
+compute 2.55 ms
+error   max 7.209e-07  mean 6.262e-08
+
+PASS — Metal output matches the NumPy reference on real weights
+```
 
 What exists:
 
@@ -41,6 +56,10 @@ What exists:
   ground truth every kernel is validated against
 - `ExpertCachePlanner` — LFU-with-LRU-tiebreak slot planner, pure logic and
   fully testable without a GPU
+- `ExpertBlobReader` — `pread` into page-aligned, zero-copy GPU memory
+- Fused MXFP4 dequant-GEMV kernels, benchmarked against affine int4
+
+Not started: the installer, attention, KV cache, tokenizer, sampling.
 
 ## Requirements
 
@@ -81,3 +100,14 @@ of a mid-sized one.
 [Apache License 2.0](LICENSE).
 
 Model weights are not included and remain governed by their own terms.
+
+## Reproducing the verification
+
+Downloads ~13 MB — one expert, not the 60 GB checkpoint. Safetensors stores
+tensors contiguously, so a single expert is one byte range per sub-tensor.
+
+```bash
+python3 Scripts/analysis/fetch_expert.py scratch/expert-l0-e0
+swift build -c release
+.build/release/godwit verify-expert scratch/expert-l0-e0
+```

@@ -51,6 +51,31 @@ func runDequantBenchmark() {
     }
 }
 
+func runExpertVerification(directory: String) {
+    do {
+        let context = try MetalContext()
+        let report = try ExpertVerification(context: context)
+            .run(directory: URL(fileURLWithPath: directory))
+
+        let mib = Double(report.bytesRead) / 1_048_576
+        print("expert  \(report.rows) x \(report.cols)")
+        print(String(format: "read    %.2f MiB in %.1f ms (%.2f GiB/s)",
+                     mib, report.readSeconds * 1000,
+                     mib / 1024 / report.readSeconds))
+        print(String(format: "compute %.2f ms", report.computeSeconds * 1000))
+        print(String(format: "error   max %.3e  mean %.3e  (worst row %d, |y| ~ %.3f)",
+                     report.maxRelativeError, report.meanRelativeError,
+                     report.worstRow, report.referenceMagnitude))
+        print(report.passed
+              ? "\nPASS — Metal output matches the NumPy reference on real weights"
+              : "\nFAIL — output diverges from the reference")
+        if !report.passed { exit(1) }
+    } catch {
+        FileHandle.standardError.write(Data("verification failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 switch arguments.first {
@@ -58,6 +83,12 @@ case "version":
     print("godwit 0.0.1-dev")
 case "bench" where arguments.dropFirst().first == "dequant":
     runDequantBenchmark()
+case "verify-expert":
+    guard let directory = arguments.dropFirst().first else {
+        FileHandle.standardError.write(Data("usage: godwit verify-expert <fixture-dir>\n".utf8))
+        exit(2)
+    }
+    runExpertVerification(directory: directory)
 case let other?:
     FileHandle.standardError.write(Data("unknown command: \(other)\n".utf8))
     exit(1)
@@ -70,5 +101,6 @@ case nil:
     commands:
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
+      verify-expert    check the Metal kernel against real GPT-OSS weights
     """)
 }

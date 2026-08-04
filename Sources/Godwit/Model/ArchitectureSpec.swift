@@ -66,6 +66,17 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
     public let logitSoftcap: Float?
     /// Whether the embedding matrix is reused as the output head.
     public let tiedEmbedding: Bool
+    /// Learned per-head term in the attention softmax denominator.
+    ///
+    /// GPT-OSS ships `self_attn.sinks`; omitting it does not crash, it just
+    /// makes attention quietly wrong, so it is modelled explicitly.
+    public let attentionSinks: Bool
+    /// Whether Q/K/V/O projections carry bias vectors. Many models have none.
+    public let attentionBias: Bool
+    /// Whether expert projections carry bias vectors.
+    public let expertBias: Bool
+    /// Whether the router carries a bias vector.
+    public let routerBias: Bool
     public let layers: [LayerSpec]
 
     public init(
@@ -81,6 +92,10 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         activation: FeedForwardActivation,
         logitSoftcap: Float?,
         tiedEmbedding: Bool,
+        attentionSinks: Bool = false,
+        attentionBias: Bool = false,
+        expertBias: Bool = false,
+        routerBias: Bool = false,
         layers: [LayerSpec]
     ) {
         self.name = name
@@ -95,6 +110,10 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         self.activation = activation
         self.logitSoftcap = logitSoftcap
         self.tiedEmbedding = tiedEmbedding
+        self.attentionSinks = attentionSinks
+        self.attentionBias = attentionBias
+        self.expertBias = expertBias
+        self.routerBias = routerBias
         self.layers = layers
     }
 
@@ -110,5 +129,43 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
     /// This bounds the per-layer slot cache and the kernel's routed-blob array.
     public var maxExpertsPerToken: Int {
         layers.map(\.expertsPerToken).max() ?? 0
+    }
+}
+
+extension ArchitectureSpec {
+    /// GPT-OSS-120B, transcribed from the published `config.json` and confirmed
+    /// against the safetensors header (see `Scripts/analysis/fetch_expert.py`).
+    ///
+    /// The first target. Note the flags: attention sinks, and biases on
+    /// attention, experts, and router — all present here and absent from most
+    /// contemporary models.
+    public static var gptOSS120B: ArchitectureSpec {
+        // 36 layers alternating sliding and full attention, starting sliding.
+        let layers = (0..<36).map { index in
+            LayerSpec(
+                attention: index.isMultiple(of: 2) ? .sliding : .full,
+                window: 128,
+                routedExpertCount: 128,
+                expertsPerToken: 4,
+                hasSharedExpert: false)
+        }
+        return ArchitectureSpec(
+            name: "gpt-oss-120b",
+            hiddenSize: 2880,
+            intermediateSize: 2880,
+            attentionHeads: 64,
+            keyValueHeads: 8,
+            headDimension: 64,
+            vocabularySize: 201088,
+            ropeTheta: 150_000,
+            rmsNormEpsilon: 1e-5,
+            activation: .silu,
+            logitSoftcap: nil,
+            tiedEmbedding: false,
+            attentionSinks: true,
+            attentionBias: true,
+            expertBias: true,
+            routerBias: true,
+            layers: layers)
     }
 }
