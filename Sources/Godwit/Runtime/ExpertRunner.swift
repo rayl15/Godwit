@@ -14,6 +14,19 @@ public struct ExpertRunner {
     public let intermediateSize: Int
     public let swigluLimit: Float
     public let swigluAlpha: Float
+    /// Use the persistent-workgroup projection kernel.
+    ///
+    /// Kept switchable so the two can be compared on identical inputs — the
+    /// naive kernel is the correctness reference the fast one is checked
+    /// against.
+    public var usePersistentKernel = true
+
+    /// Threadgroups launched by the persistent kernel.
+    ///
+    /// Enough to fill the GPU with several waves so stragglers overlap, but not
+    /// so many that the grid-stride loop degenerates back into one row per
+    /// threadgroup. The M4 has 10 cores.
+    public static let persistentThreadgroups = 64
 
     public init(context: MetalContext, reader: ModelReader,
                 swigluLimit: Float? = nil, swigluAlpha: Float? = nil) {
@@ -70,7 +83,9 @@ public struct ExpertRunner {
         let activated = try context.emptyBuffer(of: Float16.self, count: intermediateSize)
         let output = try context.emptyBuffer(of: Float.self, count: hiddenSize)
 
-        let gemv = try context.pipeline(shader: "expert", function: "mxfp4_gemv_bias")
+        let gemv = try context.pipeline(
+            shader: "expert",
+            function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
         let activation = try context.pipeline(shader: "expert",
                                               function: "gptoss_expert_activation")
 
@@ -123,6 +138,7 @@ public struct ExpertRunner {
             throw MetalError.encoderCreationFailed
         }
         var colsValue = UInt32(cols)
+        var rowsValue = UInt32(rows)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(blocks, offset: 0, index: 0)
         encoder.setBuffer(scales, offset: 0, index: 1)
@@ -130,9 +146,17 @@ public struct ExpertRunner {
         encoder.setBuffer(x, offset: 0, index: 3)
         encoder.setBuffer(y, offset: 0, index: 4)
         encoder.setBytes(&colsValue, length: MemoryLayout<UInt32>.size, index: 5)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: rows, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+
+        if usePersistentKernel {
+            encoder.setBytes(&rowsValue, length: MemoryLayout<UInt32>.size, index: 6)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: Self.persistentThreadgroups, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        } else {
+            encoder.dispatchThreadgroups(
+                MTLSize(width: rows, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        }
         encoder.endEncoding()
     }
 }

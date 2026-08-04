@@ -167,6 +167,49 @@ produces the wrong abstraction; a second model would show what actually varies
 rather than what we imagine does. GPT-OSS-20B is the obvious candidate — same
 family, different dimensions, and small enough to run alongside for comparison.
 
+## Measuring on a fanless machine
+
+The M4 Air's GPU throughput drifts by up to 2x under sustained load, which is
+larger than most differences worth detecting. Three methodology failures were
+hit and fixed here, in order:
+
+1. **All variants in one process.** Each heated the GPU for the next: the
+   *unchanged* naive baseline measured 27 G w/s with five configs ahead of it
+   and 13 with eight. Position in the run was worth 2x.
+2. **Separate processes, seconds apart.** Better, but the machine still drifted
+   between the two runs of a pair; ratios on identical code swung 0.62 to 2.02.
+3. **A four-round sign test.** 4 of 4 looks convincing and is not — chance
+   produces it one time in eight. A promising 4/4 result evaporated to 6/12.
+
+What works: `godwit ab-kernel` alternates two kernels inside one process, ~40
+pairs milliseconds apart, and reports the median B/A ratio with a sign test.
+Both variants see the same thermal state, so the ratio means something even
+when neither absolute number does.
+
+**Report ratios, not absolutes, and never trust fewer than ~20 pairs.**
+
+## Kernel findings
+
+Measured with the harness above. Negative results included, because they cost
+as much to obtain as the positive ones.
+
+| Change | Effect | Verdict |
+| --- | --- | --- |
+| Persistent workgroups, grid-stride | +2.2%, p=0.0016 | Real but negligible |
+| Staging x in threadgroup memory | none | Rejected |
+| Codebook in constant address space | none, p=0.75 | Rejected |
+| **4 rows per SIMD group** | **+18.2% wide, +11.2% narrow, p<0.0001** | **Production** |
+
+The diagnosis mattered more than any individual attempt. The kernel is neither
+bandwidth-bound (19% of the M4's) nor ALU-bound (2%) — it is latency-bound.
+Each lane walked three blocks for its row, one dependent load at a time, with
+nothing to overlap the memory latency against. Processing four rows at once
+gives four independent load streams and reuses each loaded x value across all
+of them.
+
+That also explains why the first three attempts failed: launch overhead, memory
+placement, and the lookup were never the constraint.
+
 ## Numerical precision
 
 Activations are FP16 throughout: q, k, v, the attention output, and the residual

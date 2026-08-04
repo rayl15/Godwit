@@ -119,6 +119,65 @@ public struct DequantGEMVBenchmark {
         }
     }
 
+    /// The persistent-workgroup variant, at the same shape.
+    public enum PersistentVariant: String, Sendable {
+        case plain, staged, lut, multirow
+        var functionName: String {
+            switch self {
+            case .plain: return "mxfp4_gemv_bias_persistent"
+            case .staged: return "mxfp4_gemv_bias_staged"
+            case .lut: return "mxfp4_gemv_bias_lut"
+            case .multirow: return "mxfp4_gemv_bias_multirow"
+            }
+        }
+    }
+
+    public func runMXFP4Persistent(
+        rows: Int, cols: Int, iterations: Int, threadgroups: Int = 64,
+        variant: PersistentVariant = .plain
+    ) throws -> Result {
+        let staged = variant == .staged
+        precondition(cols % 32 == 0, "MXFP4 needs cols to be a multiple of 32")
+        let blocksPerRow = cols / 32
+        let packed = Self.pseudoRandomBytes(count: rows * cols / 2, seed: 0xA5A5)
+        let scales = (0..<(rows * blocksPerRow)).map { UInt8(120 + ($0 % 14)) }
+        let bias = [Float16](repeating: 0, count: rows)
+        let x = Self.activations(count: cols, seed: 0x1234)
+
+        let packedBuffer = try context.buffer(packed)
+        let scaleBuffer = try context.buffer(scales)
+        let biasBuffer = try context.buffer(bias)
+        let xBuffer = try context.buffer(x)
+        let yBuffer = try context.emptyBuffer(of: Float.self, count: rows)
+        var colsValue = UInt32(cols)
+        var rowsValue = UInt32(rows)
+
+        let pipeline = try context.pipeline(
+            shader: "expert",
+            function: variant.functionName)
+
+        let seconds = try time(iterations: iterations) { encoder in
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(packedBuffer, offset: 0, index: 0)
+            encoder.setBuffer(scaleBuffer, offset: 0, index: 1)
+            encoder.setBuffer(biasBuffer, offset: 0, index: 2)
+            encoder.setBuffer(xBuffer, offset: 0, index: 3)
+            encoder.setBuffer(yBuffer, offset: 0, index: 4)
+            encoder.setBytes(&colsValue, length: MemoryLayout<UInt32>.size, index: 5)
+            encoder.setBytes(&rowsValue, length: MemoryLayout<UInt32>.size, index: 6)
+            if staged {
+                encoder.setThreadgroupMemoryLength(cols * 2, index: 0)
+            }
+            encoder.dispatchThreadgroups(
+                MTLSize(width: threadgroups, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+
+        return makeResult(label: "MXFP4 \(variant.rawValue) (\(threadgroups) tg)",
+                          rows: rows, cols: cols, iterations: iterations,
+                          seconds: seconds, bitsPerWeight: 4.25, error: nil)
+    }
+
     // MARK: - Affine int4 baseline
 
     public func runAffineInt4(rows: Int, cols: Int, iterations: Int) throws -> Result {
@@ -158,6 +217,74 @@ public struct DequantGEMVBenchmark {
                           bitsPerWeight: 4.5, error: nil)
     }
 
+    // MARK: - Interleaved A/B
+
+    public struct ABResult: Sendable {
+        public let labelA: String
+        public let labelB: String
+        public let pairs: Int
+        /// Per-pair B/A throughput ratios.
+        public let ratios: [Double]
+
+        public var medianRatio: Double {
+            let sorted = ratios.sorted()
+            guard !sorted.isEmpty else { return 1 }
+            return sorted.count % 2 == 1
+                ? sorted[sorted.count / 2]
+                : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+        }
+
+        public var bWins: Int { ratios.filter { $0 > 1 }.count }
+
+        /// Two-sided sign-test p-value, normal approximation.
+        ///
+        /// Included because a 4-of-4 result looks convincing and is not: at four
+        /// samples, chance produces it one time in eight.
+        public var signTestP: Double {
+            let n = Double(ratios.count)
+            guard n >= 8 else { return .nan }
+            let z = abs(Double(bWins) - n / 2) / (n.squareRoot() / 2)
+            return 2 * (1 - Self.normalCDF(z))
+        }
+
+        private static func normalCDF(_ z: Double) -> Double {
+            0.5 * (1 + erf(z / 2.0.squareRoot()))
+        }
+    }
+
+    /// Times two kernels alternately inside one process.
+    ///
+    /// Separate processes seconds apart could not resolve these kernels: the
+    /// machine's own drift between the two runs of a pair was larger than any
+    /// difference between them, and ratios swung from 0.62 to 2.02 on identical
+    /// code. Alternating short measurements puts each pair milliseconds apart,
+    /// so both see the same thermal state and the ratio means something.
+    public func compareInterleaved(
+        _ a: (Int, Int, Int) throws -> Result,
+        _ b: (Int, Int, Int) throws -> Result,
+        rows: Int, cols: Int, pairs: Int = 40, iterationsPerSample: Int = 12
+    ) throws -> ABResult {
+        var ratios: [Double] = []
+        var labelA = ""
+        var labelB = ""
+        for index in 0..<pairs {
+            // Alternate which runs first so neither keeps the warmer slot.
+            let resultA: Result
+            let resultB: Result
+            if index % 2 == 0 {
+                resultA = try a(rows, cols, iterationsPerSample)
+                resultB = try b(rows, cols, iterationsPerSample)
+            } else {
+                resultB = try b(rows, cols, iterationsPerSample)
+                resultA = try a(rows, cols, iterationsPerSample)
+            }
+            labelA = resultA.label
+            labelB = resultB.label
+            ratios.append(resultB.weightsPerSecond / resultA.weightsPerSecond)
+        }
+        return ABResult(labelA: labelA, labelB: labelB, pairs: pairs, ratios: ratios)
+    }
+
     // MARK: - Plumbing
 
     private func time(
@@ -182,7 +309,7 @@ public struct DequantGEMVBenchmark {
         // timing round has enough spread to invert a comparison. Report the
         // median of several rounds instead.
         var rounds: [Double] = []
-        for _ in 0..<Self.timingRounds {
+        for _ in 0..<max(1, Self.timingRounds) {
             let start = CFAbsoluteTimeGetCurrent()
             for _ in 0..<iterations { try dispatchOnce() }
             rounds.append(CFAbsoluteTimeGetCurrent() - start)

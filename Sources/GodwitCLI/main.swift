@@ -9,44 +9,79 @@ let weightsPerToken = Double(4 * 36 * expertParams)
 let ioBudgetSeconds = 0.225   // 8 cache slots, measured NVMe bandwidth
 let requiredWeightsPerSecond = weightsPerToken / ioBudgetSeconds
 
-func runDequantBenchmark() {
+func runDequantBenchmark(only: String?, rows: Int, cols: Int, threadgroups: Int) {
     do {
         let context = try MetalContext()
         let benchmark = DequantGEMVBenchmark(context: context)
 
-        print("device: \(context.device.name)")
-        print("""
-              budget: \(String(format: "%.2f", weightsPerToken / 1e9))B expert weights/token \
-              in \(Int(ioBudgetSeconds * 1000)) ms
-              """)
-        print("        => need \(String(format: "%.1f", requiredWeightsPerSecond / 1e9)) G weights/s\n")
-
-        // GPT-OSS expert shapes: gate+up is 5760x2880, down is 2880x2880.
-        let shapes = [(rows: 5760, cols: 2880), (rows: 2880, cols: 2880)]
-
-        for shape in shapes {
-            print("--- \(shape.rows) x \(shape.cols) ---")
-            let results = [
-                try benchmark.runMXFP4(rows: shape.rows, cols: shape.cols,
-                                       iterations: 200, validate: true),
-                try benchmark.runAffineInt4(rows: shape.rows, cols: shape.cols,
-                                            iterations: 200),
-            ]
-            for result in results {
-                let headroom = result.weightsPerSecond / requiredWeightsPerSecond
-                let error = result.maxAbsoluteError.map { String(format: "%.2e", $0) } ?? "-"
-                print(String(
-                    format: "  %-32@  %6.1f G w/s  %6.1f GiB/s  %5.2fx budget  err %@",
-                    result.label as NSString,
-                    result.weightsPerSecond / 1e9,
-                    result.gibPerSecond,
-                    headroom,
-                    error as NSString))
-            }
-            print()
+        // One configuration per process, on purpose.
+        //
+        // Running every variant in one process made each one heat the GPU for
+        // the next: the *unchanged* naive baseline measured 27 G w/s when five
+        // configs preceded it and 13 when eight did. Position in the run was
+        // worth 2x, which is larger than any difference between the kernels,
+        // so the comparison was meaningless. Whatever runs must run alone.
+        let result: DequantGEMVBenchmark.Result
+        switch only {
+        case "naive", nil:
+            result = try benchmark.runMXFP4(rows: rows, cols: cols,
+                                            iterations: 200, validate: true)
+        case "affine":
+            result = try benchmark.runAffineInt4(rows: rows, cols: cols, iterations: 200)
+        case "persistent":
+            result = try benchmark.runMXFP4Persistent(rows: rows, cols: cols,
+                                                      iterations: 200,
+                                                      threadgroups: threadgroups)
+        case "staged":
+            result = try benchmark.runMXFP4Persistent(rows: rows, cols: cols,
+                                                      iterations: 200,
+                                                      threadgroups: threadgroups, variant: .staged)
+        case "lut":
+            result = try benchmark.runMXFP4Persistent(rows: rows, cols: cols,
+                                                      iterations: 200,
+                                                      threadgroups: threadgroups, variant: .lut)
+        default:
+            FileHandle.standardError.write(Data(
+                "unknown variant '\(only!)' — use naive, affine, persistent, staged\n".utf8))
+            exit(2)
         }
+
+        print(String(format: "%-28@ %5dx%-5d  %6.2f G w/s  %6.2f GiB/s",
+                     result.label as NSString, rows, cols,
+                     result.weightsPerSecond / 1e9, result.gibPerSecond))
+        fflush(stdout)
     } catch {
         FileHandle.standardError.write(Data("benchmark failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+func runKernelAB(rows: Int, cols: Int, pairs: Int) {
+    do {
+        let context = try MetalContext()
+        let benchmark = DequantGEMVBenchmark(context: context)
+        let result = try benchmark.compareInterleaved(
+            { r, c, i in try benchmark.runMXFP4(rows: r, cols: c, iterations: i, validate: false) },
+            { r, c, i in try benchmark.runMXFP4Persistent(rows: r, cols: c, iterations: i,
+                                                          variant: .multirow) },
+            rows: rows, cols: cols, pairs: pairs)
+
+        print("A: \(result.labelA)")
+        print("B: \(result.labelB)")
+        print("shape \(rows)x\(cols), \(result.pairs) interleaved pairs\n")
+        print(String(format: "median B/A ratio  %.3f", result.medianRatio))
+        print(String(format: "B faster in       %d of %d pairs", result.bWins, result.pairs))
+        let p = result.signTestP
+        print(String(format: "sign test p       %.4f", p))
+        if p < 0.01 {
+            print(result.medianRatio > 1
+                  ? "\nB is faster — real effect"
+                  : "\nB is SLOWER — real effect")
+        } else {
+            print("\nno detectable difference on this hardware")
+        }
+    } catch {
+        FileHandle.standardError.write(Data("A/B failed: \(error)\n".utf8))
         exit(1)
     }
 }
@@ -407,7 +442,23 @@ switch arguments.first {
 case "version":
     print("godwit 0.0.1-dev")
 case "bench" where arguments.dropFirst().first == "dequant":
-    runDequantBenchmark()
+    var only: String?
+    var benchRows = 5760
+    var benchCols = 2880
+    var benchTG = 64
+    var benchFlags = arguments.dropFirst(2).makeIterator()
+    while let flag = benchFlags.next() {
+        switch flag {
+        case "--only": only = benchFlags.next()
+        case "--rows": benchRows = benchFlags.next().flatMap(Int.init) ?? 5760
+        case "--cols": benchCols = benchFlags.next().flatMap(Int.init) ?? 2880
+        case "--threadgroups": benchTG = benchFlags.next().flatMap(Int.init) ?? 64
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    runDequantBenchmark(only: only, rows: benchRows, cols: benchCols, threadgroups: benchTG)
 case "install":
     var target: String?
     var limit: Int?
@@ -485,6 +536,18 @@ case "check-attention":
         exit(2)
     }
     runAttentionCheck(model: attArgs[0], reference: attArgs[1])
+case "ab-kernel":
+    var abRows = 5760, abCols = 2880, abPairs = 40
+    var abFlags = arguments.dropFirst().makeIterator()
+    while let flag = abFlags.next() {
+        switch flag {
+        case "--rows": abRows = abFlags.next().flatMap(Int.init) ?? 5760
+        case "--cols": abCols = abFlags.next().flatMap(Int.init) ?? 2880
+        case "--pairs": abPairs = abFlags.next().flatMap(Int.init) ?? 40
+        default: break
+        }
+    }
+    runKernelAB(rows: abRows, cols: abCols, pairs: abPairs)
 case "check-expert":
     let rest = Array(arguments.dropFirst())
     guard rest.count == 2 else {

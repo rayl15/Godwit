@@ -18,6 +18,18 @@ using namespace metal;
 
 constant constexpr uint kSimdWidth = 32;
 
+// The E2M1 codebook in the constant address space, indexed by the full 4-bit
+// code including its sign.
+//
+// Declaring this inside the function, as the original did, makes it a
+// thread-local array; a dynamic index into one of those can spill to stack
+// memory instead of staying in registers, and this is the innermost operation
+// in the whole runtime — two lookups per packed byte, billions per token.
+constant float kFP4[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
+
 inline float mxfp4_code_to_float(uint code) {
     const float magnitude[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
     float value = magnitude[code & 0x7u];
@@ -101,4 +113,256 @@ kernel void expert_accumulate(
 {
     if (index >= width) { return; }
     destination[index] += expert_out[index] * weight;
+}
+
+// Persistent-workgroup gate_up/down projection.
+//
+// The naive kernel above launches one 32-thread threadgroup per output row —
+// 5,760 of them for gate_up. Measured at 13-33 G weights/s while using roughly
+// a tenth of the M4's memory bandwidth, which says it is bound by launch
+// overhead and occupancy rather than by arithmetic or by memory.
+//
+// Three changes:
+//
+//   1. 256-thread threadgroups holding 8 SIMD groups, each SIMD group taking a
+//      row. That cuts the threadgroup count eightfold and gives each one real
+//      work to do.
+//   2. A grid-stride loop, so a fixed pool of threadgroups drains the rows
+//      instead of one being launched per row. No atomics needed — the stride
+//      partitions the work with no contention.
+//   3. 16-byte vector loads. An MXFP4 block is exactly 16 packed bytes, and
+//      because cols/2 is a multiple of 16 for these shapes, every block starts
+//      16-byte aligned.
+constant constexpr uint kSimdsPerGroup = 8;
+
+kernel void mxfp4_gemv_bias_persistent(
+    device const uchar  *packed [[buffer(0)]],
+    device const uchar  *scales [[buffer(1)]],
+    device const bfloat *bias   [[buffer(2)]],
+    device const half   *x      [[buffer(3)]],
+    device float        *y      [[buffer(4)]],
+    constant uint       &cols   [[buffer(5)]],
+    constant uint       &rows   [[buffer(6)]],
+    uint                 tgid   [[threadgroup_position_in_grid]],
+    uint                 tgSize [[threadgroups_per_grid]],
+    uint                 tid    [[thread_index_in_threadgroup]])
+{
+    const uint simd = tid / 32u;
+    const uint lane = tid % 32u;
+    const uint blocksPerRow = cols / 32u;
+    const uint rowStride = tgSize * kSimdsPerGroup;
+
+    for (uint row = tgid * kSimdsPerGroup + simd; row < rows; row += rowStride) {
+        const uint packedRowBase = row * (cols / 2u);
+        const uint scaleRowBase = row * blocksPerRow;
+
+        float acc = 0.0f;
+        for (uint b = lane; b < blocksPerRow; b += 32u) {
+            const float scale = mxfp4_decode_scale(scales[scaleRowBase + b]);
+            // One block in one load.
+            const uint4 chunk = *reinterpret_cast<device const uint4 *>(
+                packed + packedRowBase + b * 16u);
+            const uint col0 = b * 32u;
+
+            float partial = 0.0f;
+            for (uint word = 0; word < 4u; ++word) {
+                const uint bits = chunk[word];
+                for (uint byte = 0; byte < 4u; ++byte) {
+                    const uint value = (bits >> (byte * 8u)) & 0xFFu;
+                    const uint index = col0 + (word * 4u + byte) * 2u;
+                    partial += mxfp4_code_to_float(value & 0x0Fu) * float(x[index]);
+                    partial += mxfp4_code_to_float(value >> 4)    * float(x[index + 1u]);
+                }
+            }
+            acc += partial * scale;
+        }
+
+        const float total = simd_sum(acc);
+        if (lane == 0) { y[row] = total + float(bias[row]); }
+    }
+}
+
+// As above, but the activation vector is staged in threadgroup memory first.
+//
+// Every lane of every SIMD group reads the whole of x while walking its rows,
+// so with 8 SIMD groups and a grid-stride loop the same 5,760 bytes are pulled
+// from device memory hundreds of times. Staging it once per threadgroup turns
+// that into one cooperative load followed by hits in fast memory.
+//
+// This should matter most for the narrow projection: down is 2,880 rows against
+// gate_up's 5,760, so it has half the work to hide its memory traffic behind.
+constant constexpr uint kMaxStagedCols = 4096;
+
+kernel void mxfp4_gemv_bias_staged(
+    device const uchar  *packed [[buffer(0)]],
+    device const uchar  *scales [[buffer(1)]],
+    device const bfloat *bias   [[buffer(2)]],
+    device const half   *x      [[buffer(3)]],
+    device float        *y      [[buffer(4)]],
+    constant uint       &cols   [[buffer(5)]],
+    constant uint       &rows   [[buffer(6)]],
+    threadgroup half    *shared [[threadgroup(0)]],
+    uint                 tgid   [[threadgroup_position_in_grid]],
+    uint                 tgSize [[threadgroups_per_grid]],
+    uint                 tid    [[thread_index_in_threadgroup]],
+    uint                 tgDim  [[threads_per_threadgroup]])
+{
+    for (uint i = tid; i < cols; i += tgDim) {
+        shared[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint simd = tid / 32u;
+    const uint lane = tid % 32u;
+    const uint blocksPerRow = cols / 32u;
+    const uint rowStride = tgSize * kSimdsPerGroup;
+
+    for (uint row = tgid * kSimdsPerGroup + simd; row < rows; row += rowStride) {
+        const uint packedRowBase = row * (cols / 2u);
+        const uint scaleRowBase = row * blocksPerRow;
+
+        float acc = 0.0f;
+        for (uint b = lane; b < blocksPerRow; b += 32u) {
+            const float scale = mxfp4_decode_scale(scales[scaleRowBase + b]);
+            const uint4 chunk = *reinterpret_cast<device const uint4 *>(
+                packed + packedRowBase + b * 16u);
+            const uint col0 = b * 32u;
+
+            float partial = 0.0f;
+            for (uint word = 0; word < 4u; ++word) {
+                const uint bits = chunk[word];
+                for (uint byte = 0; byte < 4u; ++byte) {
+                    const uint value = (bits >> (byte * 8u)) & 0xFFu;
+                    const uint index = col0 + (word * 4u + byte) * 2u;
+                    partial += mxfp4_code_to_float(value & 0x0Fu) * float(shared[index]);
+                    partial += mxfp4_code_to_float(value >> 4)    * float(shared[index + 1u]);
+                }
+            }
+            acc += partial * scale;
+        }
+
+        const float total = simd_sum(acc);
+        if (lane == 0) { y[row] = total + float(bias[row]); }
+    }
+}
+
+
+// Identical to mxfp4_gemv_bias_persistent except that it indexes the constant
+// address space codebook. Kept as a separate kernel so the A/B measures the
+// lookup and nothing else.
+kernel void mxfp4_gemv_bias_lut(
+    device const uchar  *packed [[buffer(0)]],
+    device const uchar  *scales [[buffer(1)]],
+    device const bfloat *bias   [[buffer(2)]],
+    device const half   *x      [[buffer(3)]],
+    device float        *y      [[buffer(4)]],
+    constant uint       &cols   [[buffer(5)]],
+    constant uint       &rows   [[buffer(6)]],
+    uint                 tgid   [[threadgroup_position_in_grid]],
+    uint                 tgSize [[threadgroups_per_grid]],
+    uint                 tid    [[thread_index_in_threadgroup]])
+{
+    const uint simd = tid / 32u;
+    const uint lane = tid % 32u;
+    const uint blocksPerRow = cols / 32u;
+    const uint rowStride = tgSize * kSimdsPerGroup;
+
+    for (uint row = tgid * kSimdsPerGroup + simd; row < rows; row += rowStride) {
+        const uint packedRowBase = row * (cols / 2u);
+        const uint scaleRowBase = row * blocksPerRow;
+
+        float acc = 0.0f;
+        for (uint b = lane; b < blocksPerRow; b += 32u) {
+            const float scale = mxfp4_decode_scale(scales[scaleRowBase + b]);
+            const uint4 chunk = *reinterpret_cast<device const uint4 *>(
+                packed + packedRowBase + b * 16u);
+            const uint col0 = b * 32u;
+
+            float partial = 0.0f;
+            for (uint word = 0; word < 4u; ++word) {
+                const uint bits = chunk[word];
+                for (uint byte = 0; byte < 4u; ++byte) {
+                    const uint value = (bits >> (byte * 8u)) & 0xFFu;
+                    const uint index = col0 + (word * 4u + byte) * 2u;
+                    partial += kFP4[value & 0x0Fu] * float(x[index]);
+                    partial += kFP4[value >> 4]    * float(x[index + 1u]);
+                }
+            }
+            acc += partial * scale;
+        }
+
+        const float total = simd_sum(acc);
+        if (lane == 0) { y[row] = total + float(bias[row]); }
+    }
+}
+
+// Four rows per SIMD group.
+//
+// The previous kernels are neither bandwidth-bound (19% of the M4's) nor
+// ALU-bound (2%) — they are latency-bound. Each lane walks three blocks for its
+// row, one dependent load at a time, with nothing to overlap the memory latency
+// against.
+//
+// Processing four rows together gives four independent load streams, and the x
+// values loaded for one row serve all four, so the ratio of arithmetic to
+// loads improves at the same time.
+constant constexpr uint kRowsPerSimd = 4;
+
+kernel void mxfp4_gemv_bias_multirow(
+    device const uchar  *packed [[buffer(0)]],
+    device const uchar  *scales [[buffer(1)]],
+    device const bfloat *bias   [[buffer(2)]],
+    device const half   *x      [[buffer(3)]],
+    device float        *y      [[buffer(4)]],
+    constant uint       &cols   [[buffer(5)]],
+    constant uint       &rows   [[buffer(6)]],
+    uint                 tgid   [[threadgroup_position_in_grid]],
+    uint                 tgSize [[threadgroups_per_grid]],
+    uint                 tid    [[thread_index_in_threadgroup]])
+{
+    const uint simd = tid / 32u;
+    const uint lane = tid % 32u;
+    const uint blocksPerRow = cols / 32u;
+    const uint packedStride = cols / 2u;
+    const uint groupStride = tgSize * kSimdsPerGroup * kRowsPerSimd;
+
+    for (uint base = (tgid * kSimdsPerGroup + simd) * kRowsPerSimd;
+         base < rows; base += groupStride) {
+
+        float acc[kRowsPerSimd];
+        for (uint r = 0; r < kRowsPerSimd; ++r) { acc[r] = 0.0f; }
+        const uint active = min(kRowsPerSimd, rows - base);
+
+        for (uint b = lane; b < blocksPerRow; b += 32u) {
+            const uint col0 = b * 32u;
+
+            // One load of x serves every row in the group.
+            float xv[32];
+            for (uint i = 0; i < 32u; ++i) { xv[i] = float(x[col0 + i]); }
+
+            for (uint r = 0; r < active; ++r) {
+                const uint row = base + r;
+                const float scale = mxfp4_decode_scale(scales[row * blocksPerRow + b]);
+                const uint4 chunk = *reinterpret_cast<device const uint4 *>(
+                    packed + row * packedStride + b * 16u);
+
+                float partial = 0.0f;
+                for (uint word = 0; word < 4u; ++word) {
+                    const uint bits = chunk[word];
+                    for (uint byte = 0; byte < 4u; ++byte) {
+                        const uint value = (bits >> (byte * 8u)) & 0xFFu;
+                        const uint slot = (word * 4u + byte) * 2u;
+                        partial += kFP4[value & 0x0Fu] * xv[slot];
+                        partial += kFP4[value >> 4]    * xv[slot + 1u];
+                    }
+                }
+                acc[r] += partial * scale;
+            }
+        }
+
+        for (uint r = 0; r < active; ++r) {
+            const float total = simd_sum(acc[r]);
+            if (lane == 0) { y[base + r] = total + float(bias[base + r]); }
+        }
+    }
 }
