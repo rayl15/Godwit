@@ -87,16 +87,18 @@ public struct ModelRunner {
     public func logits(
         tokens: [Int], positionBase: Int = 0, cache: KVCache, weights: Weights,
         expertCache: ExpertCache? = nil,
-        progress: (Int, Int) -> Void = { _, _ in }
+        progress: (Int, Int) -> Void = { _, _ in },
+        routing: ((Int, [Router.Decision]) -> Void)? = nil
     ) throws -> [Float] {
         precondition(!tokens.isEmpty, "need at least one token")
         var stream = try embed(tokens: tokens, weights: weights)
 
         for (index, layer) in layers.enumerated() {
-            let (next, _) = try layer.forward(
+            let (next, trace) = try layer.forward(
                 hidden: stream, tokenCount: tokens.count, positionBase: positionBase,
                 weights: weights.layers[index], cache: cache, expertCache: expertCache)
             stream = next
+            routing?(index, trace.routing)
             progress(index + 1, layers.count)
         }
         cache.advance(by: tokens.count)

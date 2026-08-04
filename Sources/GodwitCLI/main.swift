@@ -324,6 +324,19 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
     }
 }
 
+func runServe(model: String, port: UInt16, slots: Int,
+              settings: Sampler.Settings, maxTokens: Int) {
+    do {
+        FileHandle.standardError.write(Data("loading model...\n".utf8))
+        let server = try ChatServer(directory: URL(fileURLWithPath: model),
+                                    slots: slots, settings: settings, maxTokens: maxTokens)
+        try server.listen(port: port)
+    } catch {
+        FileHandle.standardError.write(Data("serve failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 func runExpertVerification(directory: String) {
     do {
         let context = try MetalContext()
@@ -827,6 +840,34 @@ case "generate":
     }
     runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
                 profile: genProfile, pageCache: genPageCache)
+case "serve":
+    var serveModel: String?
+    var servePort: UInt16 = 8080
+    var serveSlots = 8
+    var serveMax = 1024
+    var serveSettings = Sampler.Settings()
+    var serveFlags = arguments.dropFirst().makeIterator()
+    while let flag = serveFlags.next() {
+        switch flag {
+        case "--model", "-m": serveModel = serveFlags.next()
+        case "--port": servePort = serveFlags.next().flatMap(UInt16.init) ?? 8080
+        case "--slots": serveSlots = serveFlags.next().flatMap(Int.init) ?? 8
+        case "--max", "-n": serveMax = serveFlags.next().flatMap(Int.init) ?? 1024
+        case "--temperature", "-t":
+            serveSettings.temperature = serveFlags.next().flatMap(Float.init) ?? 0.7
+        case "--greedy": serveSettings = .greedy
+        default:
+            FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
+            exit(2)
+        }
+    }
+    guard let serveModel else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit serve --model <dir> [--port 8080] [--temperature N]\n".utf8))
+        exit(2)
+    }
+    runServe(model: serveModel, port: servePort, slots: serveSlots,
+             settings: serveSettings, maxTokens: serveMax)
 case "chat":
     var chatModel: String?
     var chatPrompt: String?
@@ -916,6 +957,7 @@ case nil:
 
     commands:
       chat             talk to the model (interactive, or --prompt for one shot)
+      serve            web dashboard with live expert routing on 127.0.0.1
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights
