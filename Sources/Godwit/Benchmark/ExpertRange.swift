@@ -3,6 +3,10 @@ import Foundation
 /// Measures what each expert is *for*, by watching which ones the router picks
 /// for different kinds of text.
 ///
+/// Named for a range map — the ornithologist's chart of where a species is
+/// found. This is the same idea applied to experts: where in topic space does
+/// each one occur.
+///
 /// Every expert gets an affinity vector over a set of topic probes — how often
 /// it fires for Python versus for Chinese versus for poetry, relative to how
 /// often it fires at all. An expert that only ever activates on code is a code
@@ -13,7 +17,7 @@ import Foundation
 /// experts sit close together because they respond to the same material. This
 /// is measurement, not a learned embedding: nothing here is trained, and the
 /// axes are whatever directions the routing actually varies along.
-public struct ExpertAtlas {
+public struct ExpertRange {
     public struct Probe: Sendable {
         public let topic: String
         public let text: String
@@ -40,7 +44,7 @@ public struct ExpertAtlas {
         public let specialisation: Float
     }
 
-    public struct Atlas: Codable, Sendable {
+    public struct Map: Codable, Sendable {
         public let topics: [String]
         public let points: [Point]
         public let layerCount: Int
@@ -137,7 +141,7 @@ public struct ExpertAtlas {
         probes: [Probe] = defaultProbes,
         slots: Int = 8,
         progress: (String, Int, Int) -> Void = { _, _, _ in }
-    ) throws -> Atlas {
+    ) throws -> Map {
         let tokenizer = try reader.loadTokenizer()
         let runner = ModelRunner(context: context, reader: reader)
         let weights = try runner.loadWeights()
@@ -176,7 +180,7 @@ public struct ExpertAtlas {
     // MARK: - Analysis
 
     static func assemble(counts: [[[Float]]], topics: [String],
-                         layerCount: Int, expertCount: Int) -> Atlas {
+                         layerCount: Int, expertCount: Int) -> Map {
         let topicCount = topics.count
 
         // Normalise twice. First by topic, because probes differ in length and
@@ -206,7 +210,7 @@ public struct ExpertAtlas {
             }
         }
         guard !vectors.isEmpty else {
-            return Atlas(topics: topics, points: [], layerCount: layerCount,
+            return Map(topics: topics, points: [], layerCount: layerCount,
                          expertCount: expertCount, variance: [])
         }
 
@@ -233,7 +237,7 @@ public struct ExpertAtlas {
                 specialisation: concentration(vector)))
         }
 
-        return Atlas(topics: topics, points: points, layerCount: layerCount,
+        return Map(topics: topics, points: points, layerCount: layerCount,
                      expertCount: expertCount, variance: variance)
     }
 

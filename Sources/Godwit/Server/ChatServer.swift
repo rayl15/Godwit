@@ -51,9 +51,9 @@ public final class ChatServer {
             switch request.path {
             case "/":
                 return .ok(contentType: "text/html; charset=utf-8", body: Data(page.utf8))
-            case "/api/atlas":
+            case "/api/range":
                 // Optional: the dashboard shows a hint when it is absent.
-                let path = directory.appendingPathComponent("atlas.json")
+                let path = directory.appendingPathComponent("range.json")
                 guard let data = try? Data(contentsOf: path) else {
                     return .json("{\"points\":[]}")
                 }

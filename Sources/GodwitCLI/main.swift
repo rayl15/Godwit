@@ -337,15 +337,15 @@ func runServe(model: String, port: UInt16, slots: Int,
     }
 }
 
-func runAtlas(model: String, output: String, slots: Int) {
+func runRange(model: String, output: String, slots: Int) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
-        let atlas = ExpertAtlas(context: context, reader: reader)
+        let expertRange = ExpertRange(context: context, reader: reader)
 
         FileHandle.standardError.write(Data("probing the router...\n".utf8))
         let started = Date()
-        let result = try atlas.build(slots: slots) { topic, done, total in
+        let result = try expertRange.build(slots: slots) { topic, done, total in
             FileHandle.standardError.write(Data(String(
                 format: "  %2d/%2d  %@\n", done, total, topic as NSString).utf8))
         }
@@ -369,7 +369,7 @@ func runAtlas(model: String, output: String, slots: Int) {
         }
         print("\nwritten to \(output)")
     } catch {
-        FileHandle.standardError.write(Data("atlas failed: \(error)\n".utf8))
+        FileHandle.standardError.write(Data("range failed: \(error)\n".utf8))
         exit(1)
     }
 }
@@ -877,25 +877,25 @@ case "generate":
     }
     runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
                 profile: genProfile, pageCache: genPageCache)
-case "atlas":
-    var atlasModel: String?
-    var atlasOut = "atlas.json"
-    var atlasSlots = 8
-    var atlasFlags = arguments.dropFirst().makeIterator()
-    while let flag = atlasFlags.next() {
+case "range":
+    var rangeModel: String?
+    var rangeOut = "range.json"
+    var rangeSlots = 8
+    var rangeFlags = arguments.dropFirst().makeIterator()
+    while let flag = rangeFlags.next() {
         switch flag {
-        case "--model", "-m": atlasModel = atlasFlags.next()
-        case "--output", "-o": atlasOut = atlasFlags.next() ?? "atlas.json"
-        case "--slots": atlasSlots = atlasFlags.next().flatMap(Int.init) ?? 8
+        case "--model", "-m": rangeModel = rangeFlags.next()
+        case "--output", "-o": rangeOut = rangeFlags.next() ?? "range.json"
+        case "--slots": rangeSlots = rangeFlags.next().flatMap(Int.init) ?? 8
         default: break
         }
     }
-    guard let atlasModel else {
+    guard let rangeModel else {
         FileHandle.standardError.write(Data(
-            "usage: godwit atlas --model <dir> [--output atlas.json]\n".utf8))
+            "usage: godwit range --model <dir> [--output range.json]\n".utf8))
         exit(2)
     }
-    runAtlas(model: atlasModel, output: atlasOut, slots: atlasSlots)
+    runRange(model: rangeModel, output: rangeOut, slots: rangeSlots)
 case "serve":
     var serveModel: String?
     var servePort: UInt16 = 8080
@@ -1014,7 +1014,7 @@ case nil:
     commands:
       chat             talk to the model (interactive, or --prompt for one shot)
       serve            web dashboard with live expert routing on 127.0.0.1
-      atlas            probe the router to measure what each expert specialises in
+      range            probe the router to measure what each expert specialises in
       version          print the version
       bench dequant    compare MXFP4 against affine int4 fused GEMV throughput
       verify-expert    check the Metal kernel against real GPT-OSS weights

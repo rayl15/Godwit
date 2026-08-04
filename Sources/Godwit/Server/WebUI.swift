@@ -105,8 +105,8 @@ enum WebUI {
         #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
                background: #08090b; border: 1px solid var(--line); }
         #sky:active { cursor: grabbing; }
-        #atlas-legend { flex-wrap: wrap; gap: 10px 16px; }
-        #atlas-legend span { display: flex; align-items: center; gap: 5px; }
+        #range-legend { flex-wrap: wrap; gap: 10px 16px; }
+        #range-legend span { display: flex; align-items: center; gap: 5px; }
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         #tip { position: fixed; pointer-events: none; background: var(--panel);
                border: 1px solid var(--line); padding: 6px 9px; font-size: 11px;
@@ -166,7 +166,7 @@ enum WebUI {
             <div class="tabs">
               <button class="tab on" data-view="chat">Chat</button>
               <button class="tab" data-view="experts">Experts</button>
-              <button class="tab" data-view="atlas">Atlas</button>
+              <button class="tab" data-view="range">Range</button>
             </div>
             <div class="pill">
               <span>status <b id="status">idle</b></span>
@@ -186,11 +186,11 @@ enum WebUI {
             <div class="axis"><span>layer 0</span><span>layer \(layers - 1)</span></div>
           </div>
 
-          <div class="view" id="v-atlas">
-            <div class="legend" id="atlas-legend"></div>
+          <div class="view" id="v-range">
+            <div class="legend" id="range-legend"></div>
             <canvas id="sky"></canvas>
             <div class="axis">
-              <span id="atlas-note">loading…</span>
+              <span id="range-note">loading…</span>
               <span>drag to spin · scroll to zoom</span>
             </div>
           </div>
@@ -214,7 +214,7 @@ enum WebUI {
           $('v-' + t.dataset.view).classList.add('on');
           // The canvas has zero size while its tab is hidden, so anything drawn
           // before it is shown goes nowhere. Redraw on activation.
-          if (t.dataset.view === 'atlas' && typeof drawAtlas === 'function') drawAtlas();
+          if (t.dataset.view === 'range' && typeof drawRange === 'function') drawRange();
         });
 
         // 36 x 128 cells. Built once and mutated by class, never rebuilt —
@@ -317,7 +317,9 @@ enum WebUI {
         }
 
 
-        // ---- Atlas: experts placed by measured routing affinity ----
+        // ---- Range: experts placed by measured routing affinity ----
+        // A range map is the ornithologist's chart of where a species is
+        // found; this is the same for experts, over topic space.
         // Colours are categorical and deliberately distinguishable on black;
         // they carry meaning (topic), so they must not be a gradient.
         const TOPIC_COLOURS = {
@@ -325,7 +327,7 @@ enum WebUI {
           legal:'#b07fd9', medical:'#6dc46d', chinese:'#e05c5c', japanese:'#e8a13c',
           russian:'#8fa8d9', json:'#c8c85e', chat:'#9b9b9b', history:'#c07a4a'
         };
-        let atlas = null, spin = { x: -0.28, y: 0.7 }, zoom = 1.7, dragging = null;
+        let rangeMap = null, spin = { x: -0.28, y: 0.7 }, zoom = 1.7, dragging = null;
         const sky = document.getElementById('sky');
         const tip = document.getElementById('tip');
 
@@ -334,20 +336,20 @@ enum WebUI {
           const cx = Math.cos(spin.x), sx = Math.sin(spin.x);
           // Centre on the cloud, not the origin: the generalist core sits well
           // off zero and would otherwise push everything into a corner.
-          const px = p.x - atlas.centre.x, py = p.y - atlas.centre.y,
-                pz = p.z - atlas.centre.z;
+          const px = p.x - rangeMap.centre.x, py = p.y - rangeMap.centre.y,
+                pz = p.z - rangeMap.centre.z;
           let x = px * cy - pz * sy;
           let z = px * sy + pz * cy;
           let y = py * cx - z * sx;
           z = py * sx + z * cx;
-          const scale = Math.min(w, h) * 0.40 * zoom / (atlas.spread || 1);
-          const depth = 1 / (1 + z * 0.35 / (atlas.spread || 1));
+          const scale = Math.min(w, h) * 0.40 * zoom / (rangeMap.spread || 1);
+          const depth = 1 / (1 + z * 0.35 / (rangeMap.spread || 1));
           return { sx: w / 2 + x * scale * depth, sy: h / 2 + y * scale * depth,
                    depth: depth, z: z };
         }
 
-        function drawAtlas() {
-          if (!atlas) return;
+        function drawRange() {
+          if (!rangeMap) return;
           const dpr = window.devicePixelRatio || 1;
           const w = sky.clientWidth, h = sky.clientHeight;
           sky.width = w * dpr; sky.height = h * dpr;
@@ -356,7 +358,7 @@ enum WebUI {
           g.fillStyle = '#08090b'; g.fillRect(0, 0, w, h);
 
           // Far points first so near ones sit on top.
-          const drawn = atlas.points.map(p => ({ p: p, v: project(p, w, h) }))
+          const drawn = rangeMap.points.map(p => ({ p: p, v: project(p, w, h) }))
                                    .sort((a, b) => b.v.z - a.v.z);
           for (const d of drawn) {
             const spec = d.p.specialisation;
@@ -371,8 +373,8 @@ enum WebUI {
           // Topic labels at the centroid of each cluster's specialists.
           g.globalAlpha = 1;
           g.font = '11px ui-monospace, Menlo, monospace';
-          for (const topic of atlas.topics) {
-            const members = atlas.points.filter(p => p.topic === topic
+          for (const topic of rangeMap.topics) {
+            const members = rangeMap.points.filter(p => p.topic === topic
                                                     && p.specialisation > 0.45);
             if (members.length < 12) continue;
             let cx = 0, cy = 0, cz = 0;
@@ -398,20 +400,20 @@ enum WebUI {
           if (!dragging) return;
           spin.y = dragging.sy + (e.clientX - dragging.x) * 0.006;
           spin.x = dragging.sx + (e.clientY - dragging.y) * 0.006;
-          drawAtlas();
+          drawRange();
         });
         sky.addEventListener('wheel', e => {
           e.preventDefault();
           zoom = Math.max(0.4, Math.min(6, zoom * (e.deltaY > 0 ? 0.92 : 1.08)));
-          drawAtlas();
+          drawRange();
         }, { passive: false });
 
         sky.addEventListener('mousemove', e => {
-          if (!atlas || dragging) { tip.style.display = 'none'; return; }
+          if (!rangeMap || dragging) { tip.style.display = 'none'; return; }
           const rect = sky.getBoundingClientRect();
           const mx = e.clientX - rect.left, my = e.clientY - rect.top;
           let best = null, bestDist = 64;
-          for (const p of atlas.points) {
+          for (const p of rangeMap.points) {
             const v = project(p, sky.clientWidth, sky.clientHeight);
             const d = (v.sx - mx) ** 2 + (v.sy - my) ** 2;
             if (d < bestDist) { bestDist = d; best = p; }
@@ -426,26 +428,26 @@ enum WebUI {
         });
         sky.addEventListener('mouseleave', () => tip.style.display = 'none');
 
-        fetch('/api/atlas').then(r => r.ok ? r.json() : null).then(data => {
-          const note = document.getElementById('atlas-note');
+        fetch('/api/range').then(r => r.ok ? r.json() : null).then(data => {
+          const note = document.getElementById('range-note');
           if (!data || !data.points || !data.points.length) {
-            note.textContent = 'no atlas — run: godwit atlas --model <dir> -o atlas.json';
+            note.textContent = 'no range map — run: godwit range --model <dir> -o range.json';
             return;
           }
-          atlas = data;
+          rangeMap = data;
           let cx = 0, cy = 0, cz = 0;
           for (const p of data.points) { cx += p.x; cy += p.y; cz += p.z; }
           const n = data.points.length;
-          atlas.centre = { x: cx / n, y: cy / n, z: cz / n };
+          rangeMap.centre = { x: cx / n, y: cy / n, z: cz / n };
           let spread = 0;
           for (const p of data.points) {
-            spread = Math.max(spread, Math.abs(p.x - atlas.centre.x),
-                              Math.abs(p.y - atlas.centre.y),
-                              Math.abs(p.z - atlas.centre.z));
+            spread = Math.max(spread, Math.abs(p.x - rangeMap.centre.x),
+                              Math.abs(p.y - rangeMap.centre.y),
+                              Math.abs(p.z - rangeMap.centre.z));
           }
-          atlas.spread = spread || 1;
+          rangeMap.spread = spread || 1;
 
-          const legend = document.getElementById('atlas-legend');
+          const legend = document.getElementById('range-legend');
           for (const topic of data.topics) {
             const n = data.points.filter(p => p.topic === topic
                                               && p.specialisation > 0.35).length;
@@ -457,9 +459,9 @@ enum WebUI {
           const v = data.variance || [];
           note.textContent = data.points.length + ' experts · axes explain '
             + v.map(x => (x * 100).toFixed(0) + '%').join(' / ') + ' of variance';
-          drawAtlas();
+          drawRange();
         });
-        window.addEventListener('resize', drawAtlas);
+        window.addEventListener('resize', drawRange);
 
         $('send').onclick = ask;
         $('input').addEventListener('keydown', e => {
