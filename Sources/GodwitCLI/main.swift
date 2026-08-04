@@ -127,7 +127,8 @@ func runLogits(model: String, tokens: [Int], topK: Int) {
     }
 }
 
-func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [], slots: Int = 8) {
+func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [],
+                 slots: Int = 8, profile: Bool = false) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
@@ -136,6 +137,13 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [], 
 
         let cache = try runner.makeCache(maxContext: tokens.count + count + 16)
         let expertCache = try runner.makeExpertCache(slots: slots)
+        var profiler: Profiler?
+        if profile {
+            let p = Profiler()
+            context.profiler = p
+            expertCache.profiler = p
+            profiler = p
+        }
         FileHandle.standardError.write(Data(String(
             format: "expert cache: %d slots x %d layers = %.2f GiB\n",
             expertCache.slotCount, expertCache.layerCount,
@@ -154,6 +162,7 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [], 
 
         // Decode: one token at a time against the cache.
         expertCache.resetStats()
+        profiler?.reset()
         let decodeStart = Date()
         for step in 0..<count {
             var best = 0
@@ -172,6 +181,10 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [], 
         FileHandle.standardError.write(Data(String(
             format: "\ndecode %d tokens in %.2fs (%.2f tok/s)\n",
             count, decode, Double(count) / decode).utf8))
+        if let profiler {
+            profiler.setTotal(decode)
+            FileHandle.standardError.write(Data(("\n" + profiler.report() + "\n").utf8))
+        }
         let s = expertCache.stats
         FileHandle.standardError.write(Data(String(
             format: "expert cache: %.1f%% hit (%d hits, %d misses), %.2f GiB read\n",
@@ -662,6 +675,7 @@ case "generate":
     var genCount = 16
     var genStop: [Int] = []
     var genSlots = 8
+    var genProfile = false
     var genFlags = arguments.dropFirst().makeIterator()
     while let flag = genFlags.next() {
         switch flag {
@@ -670,6 +684,7 @@ case "generate":
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         case "--count", "-n": genCount = genFlags.next().flatMap(Int.init) ?? 16
         case "--slots": genSlots = genFlags.next().flatMap(Int.init) ?? 8
+        case "--profile": genProfile = true
         case "--stop": genStop = (genFlags.next() ?? "")
             .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         default: break
@@ -680,7 +695,8 @@ case "generate":
             "usage: godwit generate --model <dir> --tokens 1,2,3 [--count N]\n".utf8))
         exit(2)
     }
-    runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots)
+    runGenerate(model: genModel, tokens: genTokens, count: genCount, stop: Set(genStop), slots: genSlots,
+                profile: genProfile)
 case "logits":
     var logitsModel: String?
     var logitsTokens: [Int] = []

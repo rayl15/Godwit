@@ -50,10 +50,10 @@ feed-forward, attention with sinks, and a complete layer including routing.
 cache, flat across the generation rather than degrading. Prefill runs about
 1.9 tok/s.
 
-Still short of the ~5 tok/s projected. Expert reads are 28% of decode time and
-expert arithmetic 13%; the remaining 59% is not yet attributed and needs
-profiling rather than another estimate — the last two attempts to account for
-it arithmetically were both wrong.
+Still short of the ~5 tok/s projected. Profiling (`--profile`) puts **71.6% of
+decode in expert reads**, running at 1.97 GiB/s where the standalone benchmark
+reaches 5.08. The GPU is busy 17.6% of the time. Two earlier attempts to
+attribute this arithmetically said 24% and 28%; both were wrong.
 
 There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
 `o200k_harmony`, which matches the model's vocabulary exactly.

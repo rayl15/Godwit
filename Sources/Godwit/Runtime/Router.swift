@@ -59,8 +59,7 @@ public struct Router {
             MTLSize(width: expertCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
-        commands.commit()
-        commands.waitUntilCompleted()
+        context.run("router", commands)
 
         let produced = output.contents().bindMemory(to: Float.self, capacity: expertCount)
         return Array(UnsafeBufferPointer(start: produced, count: expertCount))

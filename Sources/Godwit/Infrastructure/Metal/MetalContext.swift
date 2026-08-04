@@ -40,6 +40,9 @@ public final class MetalContext {
     public let device: MTLDevice
     public let queue: MTLCommandQueue
 
+    /// Optional; when set, the runtime records where its time goes.
+    public var profiler: Profiler?
+
     private var libraries: [String: MTLLibrary] = [:]
     private var pipelines: [String: MTLComputePipelineState] = [:]
     private let lock = NSLock()
@@ -132,6 +135,15 @@ public final class MetalContext {
             return url
         }
         return nil
+    }
+
+    /// Commits, waits, and records both wall and GPU time under `label`.
+    public func run(_ label: String, _ commands: MTLCommandBuffer) {
+        let start = CFAbsoluteTimeGetCurrent()
+        commands.commit()
+        commands.waitUntilCompleted()
+        profiler?.record(label, commandBuffer: commands,
+                         wall: CFAbsoluteTimeGetCurrent() - start)
     }
 
     /// Allocates a shared-storage buffer holding `values`.

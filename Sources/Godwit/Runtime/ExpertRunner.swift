@@ -159,8 +159,7 @@ public struct ExpertRunner {
             combiner.endEncoding()
         }
 
-        commands.commit()
-        commands.waitUntilCompleted()
+        context.run("experts", commands)
 
         let produced = combined.contents().bindMemory(to: Float.self, capacity: hiddenSize)
         return Array(UnsafeBufferPointer(start: produced, count: hiddenSize))
@@ -222,8 +221,7 @@ public struct ExpertRunner {
                        x: activated, y: output,
                        rows: hiddenSize, cols: intermediateSize)
 
-        commands.commit()
-        commands.waitUntilCompleted()
+        context.run("experts", commands)
 
         let produced = output.contents().bindMemory(to: Float.self, capacity: hiddenSize)
         return Array(UnsafeBufferPointer(start: produced, count: hiddenSize))

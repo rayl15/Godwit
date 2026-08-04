@@ -167,8 +167,7 @@ public struct ModelRunner {
             MTLSize(width: rows, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
-        commands.commit()
-        commands.waitUntilCompleted()
+        context.run("head", commands)
 
         let produced = output.contents().bindMemory(to: Float.self, capacity: rows)
         return Array(UnsafeBufferPointer(start: produced, count: rows))

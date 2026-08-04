@@ -212,28 +212,37 @@ placement, and the lookup were never the constraint.
 
 ## Where decode time actually goes
 
-Measured over 40 generated tokens at 1.42 tok/s, eight expert slots:
+Measured, not estimated. `godwit generate --profile` records wall time per
+phase and GPU busy time per command buffer.
 
-| | Time | Share |
-| --- | ---: | ---: |
-| Expert reads (40.4 GiB at 5.08 GiB/s) | 8.0 s | 28% |
-| Expert arithmetic (143G weights at 40 G w/s) | 3.6 s | 13% |
-| Everything else | 16.7 s | 59% |
+| Phase | Calls | Wall | GPU | Share |
+| --- | ---: | ---: | ---: | ---: |
+| **expert reads** | 1,897 | **11.90 s** | — | **71.6%** |
+| experts (compute) | 828 | 2.78 s | 1.77 s | 16.8% |
+| attention | 828 | 1.11 s | 0.73 s | 6.7% |
+| output head | 23 | 0.37 s | 0.37 s | 2.3% |
+| router | 828 | 0.26 s | 0.06 s | 1.6% |
+| CPU norm + residual | 3,312 | 0.02 s | — | 0.1% |
 
-Batching cut command buffers from 504 per token to 108 and bought 17%. At the
-~1.6 ms per submission the earlier numbers implied, the remaining 108 should
-account for about 7 s of the 16.7 s, so submissions no longer explain the gap.
+**GPU busy: 17.6% of wall time.**
 
-**This has now been attributed by arithmetic twice and been wrong twice** — the
-first estimate counted 144 command buffers where there were 504. The remaining
-59% needs instrumentation (Metal system trace) rather than a third estimate.
-Candidates worth measuring rather than assuming: per-call `MTLBuffer`
-allocation, of which there are several hundred per token; CPU-side RMSNorm and
-residual arithmetic; and GPU idle time between the 108 synchronisation points.
+Two earlier attempts to attribute this arithmetically put reads at 24% and then
+28%. They are 71.6%. Both estimates were wrong, and the second was wrong in the
+same direction as the first, which is what estimating instead of measuring
+tends to produce.
 
-The feasibility estimate assumed reads were the constraint. They are 28% of it.
+The reads run at **1.97 GiB/s**, against 5.08 GiB/s for the same 12.6 MiB reads
+at eight threads in the standalone benchmark. Reading the misses concurrently
+was tried and did **not** help: at eight slots a token has only two or three
+misses per layer, so there is never enough outstanding work to saturate NVMe.
 
-## Numerical precision
+The structure is the problem, not the loop. Routing must finish before a read
+can start, and the read must finish before the expert can run, once per layer,
+36 times per token. Prefetch would break the chain — and it was measured not to
+work on this model. What is left to try: fewer misses (more slots), or reads
+issued for several layers at once, which the current shape forbids.
+
+## Numerical precision## Numerical precision
 
 Activations are FP16 throughout: q, k, v, the attention output, and the residual
 stream. That is the KV cache format the memory budget assumes, so it is a

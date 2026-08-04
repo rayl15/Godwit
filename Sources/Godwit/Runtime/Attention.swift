@@ -156,8 +156,7 @@ public struct Attention {
                              bias: weights.oBias, output: projected,
                              rows: spec.hiddenSize, cols: qWidth, tokens: tokenCount)
 
-        commands.commit()
-        commands.waitUntilCompleted()
+        context.run("attention", commands)
 
         let produced = projected.contents().bindMemory(
             to: Float16.self, capacity: tokenCount * spec.hiddenSize)

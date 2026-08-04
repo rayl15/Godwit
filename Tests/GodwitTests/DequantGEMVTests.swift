@@ -76,3 +76,47 @@ struct DequantGEMVTests {
         #expect(abs(rows[0] - 32.0) < 1e-4)
     }
 }
+
+@Suite("Profiler")
+struct ProfilerTests {
+    /// The trap that removed the residual connections.
+    ///
+    /// `optional?.measure(name) { work }` skips `work` entirely when the
+    /// optional is nil, because optional chaining short-circuits the whole
+    /// expression including its closure argument. Any timing helper must run
+    /// the body whether or not a profiler is attached.
+    @Test("Optional chaining skips the closure — the shape that caused a bug")
+    func optionalChainingSkipsWork() {
+        var ran = false
+        let absent: Profiler? = nil
+        absent?.measure("x") { ran = true }
+        #expect(!ran, "this is the trap: the work never happened")
+
+        ran = false
+        let present: Profiler? = Profiler()
+        present?.measure("x") { ran = true }
+        #expect(ran)
+    }
+
+    @Test("A guard-based helper always runs the body")
+    func guardedHelperAlwaysRuns() {
+        func timed<T>(_ profiler: Profiler?, _ name: String, _ body: () -> T) -> T {
+            guard let profiler else { return body() }
+            return profiler.measure(name, body)
+        }
+        var count = 0
+        _ = timed(nil, "x") { count += 1 }
+        _ = timed(Profiler(), "x") { count += 1 }
+        #expect(count == 2, "body must run in both cases")
+    }
+
+    @Test("Records wall time and call counts")
+    func recordsTiming() {
+        let profiler = Profiler()
+        for _ in 0..<3 { profiler.measure("work") { _ = (0..<1000).reduce(0, +) } }
+        profiler.setTotal(1.0)
+        let report = profiler.report()
+        #expect(report.contains("work"))
+        #expect(report.contains("3"), "should show three calls")
+    }
+}

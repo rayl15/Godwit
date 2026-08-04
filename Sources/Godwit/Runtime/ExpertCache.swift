@@ -21,6 +21,9 @@ import Metal
 /// wrapped with `makeBuffer(bytesNoCopy:)`, so a hit costs nothing at all and a
 /// miss is a read into memory the GPU already holds a handle to.
 public final class ExpertCache {
+    /// Set to record read time separately from everything else.
+    public var profiler: Profiler?
+
     public struct Stats: Sendable {
         public var hits = 0
         public var misses = 0
@@ -109,10 +112,39 @@ public final class ExpertCache {
         stats.hits += plan.hitCount
         stats.misses += plan.missCount
 
-        for index in plan.missIndices {
-            try read(layer: layer, expert: plan.experts[index], slot: plan.slots[index])
-            stats.bytesRead += stride
+        guard !plan.missIndices.isEmpty else { return plan.slots }
+
+        // Read the misses concurrently.
+        //
+        // Serially these ran at 1.97 GiB/s against the 5.08 GiB/s the same
+        // 12.6 MiB reads reach at eight threads — one outstanding request never
+        // saturates NVMe, and profiling put 71.6% of decode in this loop. The
+        // misses are independent by construction: the planner has already
+        // assigned each a distinct slot.
+        let start = CFAbsoluteTimeGetCurrent()
+        let misses = plan.missIndices
+        let errorLock = NSLock()
+        nonisolated(unsafe) var failure: Error?
+
+        if misses.count == 1 {
+            try read(layer: layer, expert: plan.experts[misses[0]], slot: plan.slots[misses[0]])
+        } else {
+            DispatchQueue.concurrentPerform(iterations: misses.count) { position in
+                let index = misses[position]
+                do {
+                    try read(layer: layer, expert: plan.experts[index], slot: plan.slots[index])
+                } catch {
+                    errorLock.lock()
+                    if failure == nil { failure = error }
+                    errorLock.unlock()
+                }
+            }
         }
+        if let failure { throw failure }
+
+        profiler?.add("io:expert-read", wall: CFAbsoluteTimeGetCurrent() - start,
+                      bytes: stride * misses.count)
+        stats.bytesRead += stride * misses.count
         return plan.slots
     }
 

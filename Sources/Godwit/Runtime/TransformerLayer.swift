@@ -71,17 +71,23 @@ public struct TransformerLayer {
         var stream = hidden
 
         // --- Attention block ---
-        var normed = try normalise(stream, tokenCount: tokenCount, weight: weights.inputNorm)
+        var normed = try timed("cpu:norm") {
+            try normalise(stream, tokenCount: tokenCount, weight: weights.inputNorm)
+        }
         let attended = try attention.forward(hidden: normed, tokenCount: tokenCount,
                                              positionBase: positionBase,
                                              weights: weights.attention, layer: index,
                                              cache: cache)
-        for i in 0..<(tokenCount * width) {
-            stream[i] = Float16(Float(stream[i]) + Float(attended[i]))
+        timed("cpu:residual") {
+            for i in 0..<(tokenCount * width) {
+                stream[i] = Float16(Float(stream[i]) + Float(attended[i]))
+            }
         }
 
         // --- Mixture-of-experts block ---
-        normed = try normalise(stream, tokenCount: tokenCount, weight: weights.postNorm)
+        normed = try timed("cpu:norm") {
+            try normalise(stream, tokenCount: tokenCount, weight: weights.postNorm)
+        }
 
         var decisions: [Router.Decision] = []
         decisions.reserveCapacity(tokenCount)
@@ -126,13 +132,29 @@ public struct TransformerLayer {
                 slice,
                 experts: resolved.enumerated().map { ($1, decision.weights[$0]) })
 
-            for i in 0..<width {
-                stream[token * width + i] = Float16(
-                    Float(stream[token * width + i]) + combined[i])
+            timed("cpu:residual") {
+                for i in 0..<width {
+                    stream[token * width + i] = Float16(
+                        Float(stream[token * width + i]) + combined[i])
+                }
             }
         }
 
         return (stream, Trace(routing: decisions))
+    }
+
+    /// Runs `body`, timing it only when a profiler is attached.
+    ///
+    /// Written as a helper because the obvious spelling is a trap:
+    /// `profiler?.measure(name) { work }` skips the work entirely when the
+    /// profiler is nil, since optional chaining short-circuits the whole
+    /// expression including its closure argument. That silently removed the
+    /// residual connections whenever profiling was off, and only the layer
+    /// regression test caught it.
+    @inline(__always)
+    private func timed<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
+        guard let profiler = context.profiler else { return try body() }
+        return try profiler.measure(name, body)
     }
 
     /// RMSNorm on the CPU.
