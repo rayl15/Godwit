@@ -78,6 +78,17 @@ Use `Scripts/test.sh` rather than `swift test` directly. On a machine with only
 the Command Line Tools installed, Swift Testing needs framework and rpath flags
 that the script supplies; without them the test bundle fails to load.
 
+## Reproducing the verification
+
+Downloads ~13 MB — one expert, not the 60 GB checkpoint. Safetensors stores
+tensors contiguously, so a single expert is one byte range per sub-tensor.
+
+```bash
+python3 Scripts/analysis/fetch_expert.py scratch/expert-l0-e0
+swift build -c release
+.build/release/godwit verify-expert scratch/expert-l0-e0
+```
+
 ## Prior art and acknowledgements
 
 Godwit is an independent, clean-room implementation. It is not a fork.
@@ -100,14 +111,3 @@ of a mid-sized one.
 [Apache License 2.0](LICENSE).
 
 Model weights are not included and remain governed by their own terms.
-
-## Reproducing the verification
-
-Downloads ~13 MB — one expert, not the 60 GB checkpoint. Safetensors stores
-tensors contiguously, so a single expert is one byte range per sub-tensor.
-
-```bash
-python3 Scripts/analysis/fetch_expert.py scratch/expert-l0-e0
-swift build -c release
-.build/release/godwit verify-expert scratch/expert-l0-e0
-```
