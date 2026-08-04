@@ -86,6 +86,78 @@ func runKernelAB(rows: Int, cols: Int, pairs: Int) {
     }
 }
 
+func runLogits(model: String, tokens: [Int], topK: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let runner = ModelRunner(context: context, reader: reader)
+
+        FileHandle.standardError.write(Data("loading resident weights...\n".utf8))
+        let loadStart = Date()
+        let weights = try runner.loadWeights()
+        FileHandle.standardError.write(Data(String(
+            format: "loaded in %.1fs\n", Date().timeIntervalSince(loadStart)).utf8))
+
+        let started = Date()
+        let logits = try runner.logits(tokens: tokens, weights: weights) { done, total in
+            FileHandle.standardError.write(Data("\rlayer \(done)/\(total)".utf8))
+        }
+        FileHandle.standardError.write(Data("\n".utf8))
+        let elapsed = Date().timeIntervalSince(started)
+
+        let ranked = logits.enumerated().sorted { $0.element > $1.element }.prefix(topK)
+        // Softmax over the top-k only, for a readable sense of confidence.
+        let peak = ranked.first?.element ?? 0
+        let exps = ranked.map { exp(Double($0.element - peak)) }
+        let total = exps.reduce(0, +)
+
+        print(String(format: "%d prompt tokens, %.2fs (%.2fs/token)",
+                     tokens.count, elapsed, elapsed / Double(tokens.count)))
+        print("top \(topK) next-token candidates:")
+        for (rank, entry) in ranked.enumerated() {
+            print(String(format: "  %2d. id %-7d logit %8.3f  p(top%d) %5.1f%%",
+                         rank + 1, entry.offset, entry.element, topK,
+                         exps[rank] / total * 100))
+        }
+    } catch {
+        FileHandle.standardError.write(Data("logits failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+func runGenerate(model: String, tokens: [Int], count: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let runner = ModelRunner(context: context, reader: reader)
+        let weights = try runner.loadWeights()
+
+        var sequence = tokens
+        var produced: [Int] = []
+        let started = Date()
+
+        for step in 0..<count {
+            // No KV reuse yet: every step re-runs the whole prompt. Correct, and
+            // quadratic — the cache is what makes this practical, and wiring it
+            // through is the next piece of work.
+            let logits = try runner.logits(tokens: sequence, weights: weights)
+            var best = 0
+            for index in logits.indices where logits[index] > logits[best] { best = index }
+            sequence.append(best)
+            produced.append(best)
+            let rate = Double(step + 1) / Date().timeIntervalSince(started)
+            FileHandle.standardError.write(Data(String(
+                format: "\rgenerated %d/%d  (%.2f tok/s)", step + 1, count, rate).utf8))
+        }
+        FileHandle.standardError.write(Data("\n".utf8))
+
+        print(produced.map(String.init).joined(separator: ","))
+    } catch {
+        FileHandle.standardError.write(Data("generate failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 func runExpertVerification(directory: String) {
     do {
         let context = try MetalContext()
@@ -548,6 +620,46 @@ case "ab-kernel":
         }
     }
     runKernelAB(rows: abRows, cols: abCols, pairs: abPairs)
+case "generate":
+    var genModel: String?
+    var genTokens: [Int] = []
+    var genCount = 16
+    var genFlags = arguments.dropFirst().makeIterator()
+    while let flag = genFlags.next() {
+        switch flag {
+        case "--model", "-m": genModel = genFlags.next()
+        case "--tokens": genTokens = (genFlags.next() ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        case "--count", "-n": genCount = genFlags.next().flatMap(Int.init) ?? 16
+        default: break
+        }
+    }
+    guard let genModel, !genTokens.isEmpty else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit generate --model <dir> --tokens 1,2,3 [--count N]\n".utf8))
+        exit(2)
+    }
+    runGenerate(model: genModel, tokens: genTokens, count: genCount)
+case "logits":
+    var logitsModel: String?
+    var logitsTokens: [Int] = []
+    var logitsTopK = 10
+    var logitsFlags = arguments.dropFirst().makeIterator()
+    while let flag = logitsFlags.next() {
+        switch flag {
+        case "--model", "-m": logitsModel = logitsFlags.next()
+        case "--tokens": logitsTokens = (logitsFlags.next() ?? "")
+            .split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        case "--top": logitsTopK = logitsFlags.next().flatMap(Int.init) ?? 10
+        default: break
+        }
+    }
+    guard let logitsModel, !logitsTokens.isEmpty else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit logits --model <dir> --tokens 1,2,3 [--top N]\n".utf8))
+        exit(2)
+    }
+    runLogits(model: logitsModel, tokens: logitsTokens, topK: logitsTopK)
 case "check-expert":
     let rest = Array(arguments.dropFirst())
     guard rest.count == 2 else {
@@ -579,6 +691,8 @@ case nil:
       check-expert     run one installed expert and compare against a reference
       check-attention  run one layer's attention and compare against a reference
       check-layer      run a complete transformer layer against a reference
+      logits           run the full model and show next-token candidates
+      generate         greedily generate tokens from a prompt
       trace-routing    measure router skew from embeddings (superseded)
       trace-layers     run real layers and test whether routing is predictable
     """)

@@ -29,64 +29,29 @@ the model at all. The bet is that "slow" beats "impossible."
 
 ## Status
 
-**Pre-alpha — no inference yet, but the foundations are verified against real
-weights.** See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and
-[docs/ESTIMATE.md](docs/ESTIMATE.md) for the measured feasibility case.
-
-Verified end to end on an M4: one expert pulled from the real GPT-OSS-120B
-checkpoint by HTTP range request, written in Godwit's blob layout, read back
-with `pread` into GPU-visible memory, and multiplied by the Metal kernel —
-matching a NumPy reference to **7.2e-07** relative error.
+**It generates text.** The full 58.93 GiB model runs on a 16 GB M4 Air,
+streaming experts from disk.
 
 ```
-$ godwit verify-expert scratch/expert-l0-e0
-expert  5760 x 2880
-read    8.40 MiB in 3.2 ms (2.56 GiB/s)
-compute 2.55 ms
-error   max 7.209e-07  mean 6.262e-08
+$ python3 Scripts/chat.py model.gwt "What is the capital of France?"
 
-PASS — Metal output matches the NumPy reference on real weights
+<|channel|>analysis<|message|>The user asks: "What is the capital of France?"
+This is a straightforward factual question. The answer
 ```
 
-What exists:
+On a raw completion the model puts 58.2% on " Paris" for "The capital of France
+is", with " a", ":" and " London" behind it.
 
-- `ArchitectureSpec` — model-agnostic transformer description; kernels take
-  these as specialisation constants rather than hardcoding a family
-- `MXFP4` — reference CPU decoder for the OCP microscaling block format, the
-  ground truth every kernel is validated against
-- `ExpertCachePlanner` — LFU-with-LRU-tiebreak slot planner, pure logic and
-  fully testable without a GPU
-- `ExpertBlobReader` — `pread` into page-aligned, zero-copy GPU memory
-- Fused MXFP4 dequant-GEMV kernels, benchmarked against affine int4
-- **Installer** — streams the checkpoint and repacks it into `.gwt`, never
-  materialising a shard. Verified byte-exact against the source.
+Verified against NumPy references at every level: MXFP4 decode, expert
+feed-forward, attention with sinks, and a complete layer including routing.
 
-- **`ExpertRunner`** — a complete expert forward pass on GPU from an installed
-  model, verified against NumPy to ~1e-5 across experts 0, 17, 64 and 127
+**Not yet usable.** There is no KV cache reuse between steps, so each token
+re-runs the entire sequence and generation is quadratic — fine for a handful of
+tokens, impractical past about twenty. That is the next piece of work and it is
+the only thing between this and a usable tool.
 
-- `Router` — top-4 selection with softmax over the selection only
-- `RoutingTrace` — measures real router skew and replays it through the planner
-- `RoPE` — YaRN-corrected frequencies, matching transformers to 1e-5
-- `Attention` — grouped-query attention with sinks and sliding windows, verified
-  against NumPy at 1, 8, 32 and 200 tokens
-
-- **`TransformerLayer`** — a complete layer, attention and MoE joined by
-  residuals, verified against NumPy with routing matching exactly
-- `KVCache` — FP16, ring-buffered for sliding layers so memory stays bounded
-
-Not started: the loop over 36 layers, tokenizer, sampling.
-
-### Installing
-
-```bash
-godwit install --output model.gwt            # ~57 GiB, hours
-godwit install --output model.gwt --layers 1 # one layer, for testing the pipeline
-python3 Scripts/analysis/verify_install.py model.gwt
-```
-
-Experts are copied through as MXFP4 without ever being dequantised; only their
-arrangement changes. The trunk arrives as BF16 and is quantised to int8 on the
-way to disk, which is lossy by design and measured.
+There is no Swift tokeniser yet either; `Scripts/chat.py` uses tiktoken's
+`o200k_harmony`, which matches the model's vocabulary exactly.
 
 ## Requirements
 
