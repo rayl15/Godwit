@@ -106,10 +106,28 @@ Chunk size is therefore the whole game, and activations are almost free:
 | 4,096 | 67.5 MiB | 11.2 s |
 | 8,192 | 135.0 MiB | 11.2 s |
 
-At 67 MiB for a 4,096-token chunk there is no memory reason to chunk small. If
-the chunk spans the whole prompt, **TTFT is a flat ~11 s for any prompt up to
-several thousand tokens.** Intra-chunk attention adds roughly 1-2 s at C=4096
-(≈5 TFLOP across the 18 full-attention layers), which does not change the shape.
+At 67 MiB for a 4,096-token chunk there is no memory reason to chunk small, so
+for long prompts the chunk should span the whole prompt and TTFT settles at
+~11 s. Intra-chunk attention adds roughly 1-2 s at C=4096 (≈5 TFLOP across the
+18 full-attention layers), which does not change the shape.
+
+### Short prompts must not pay the full pass
+
+The full-pool pass is only worth it once a prompt has enough tokens to touch
+every expert. Below that, processing the prompt token-by-token like decode is
+strictly cheaper, and short prompts are the common case:
+
+| Prompt | Streamed | Full pass | Cheaper |
+| ---: | ---: | ---: | --- |
+| 10 tokens | 2.2 s | 11.2 s | stream |
+| 20 tokens | 4.5 s | 11.2 s | stream |
+| 50 tokens | 11.2 s | 11.2 s | either |
+| 100 tokens | 22.5 s | 11.2 s | full pass |
+
+**The crossover is ~50 tokens, and the prefill path should choose per prompt.**
+A typical chat opener is 5-15 tokens, so the common-case TTFT is 2-3 s rather
+than 11 s. Treating 11 s as the universal figure — as an earlier version of this
+document did — overstates latency for exactly the prompts users type most.
 
 ### This model reproduces TurboFieldfare's measurement
 
@@ -122,6 +140,49 @@ It also implies their own prefill would improve severalfold with larger chunks.
 They ran 17 prefill experiments, so there may be a constraint not visible from
 outside — but nothing in the published record rules it out, and it is worth
 testing.
+
+## Getting to a usable tool
+
+The figures above describe a naive implementation. Two levers move it into
+normal-feeling territory, and both should shape the design rather than be
+retrofitted.
+
+**Choose the prefill strategy per prompt** (above). Common-case TTFT 11 s → 2-3 s.
+
+**Speculative decoding.** A ~0.5 GiB draft model proposes K tokens; the 120B
+verifies them in roughly one pass and keeps the agreed prefix. This suits a
+disk-bound runtime unusually well — verifying 8 tokens reuses most of the
+experts that verifying 1 would, so the extra tokens are nearly free in I/O terms,
+which is exactly the resource we are short of.
+
+| Draft length | Acceptance | Decode |
+| ---: | ---: | ---: |
+| 4 | 60% | 7.6 tok/s |
+| 8 | 50% | 11.1 tok/s |
+| 8 | 70% | 14.7 tok/s |
+
+Assumes verifying K tokens costs ~2× a single token. Unvalidated, and the draft
+model must be small enough not to disturb the memory budget.
+
+**Target with both: ~2-3 s to first token, 8-12 tok/s.** For reference, 4 tok/s
+is already ~205 words/minute against a reading speed of ~250, so the perceived
+problem is the initial pause and the total for long answers, not the stream
+itself.
+
+## The competitive question
+
+GPT-OSS-20B fits in 16 GB today and runs at 30-50 tok/s under MLX. Any honest
+case for this project has to answer why someone would wait for the 120B:
+
+- **8 GB machines**, where even 20B is a squeeze. This is the only route to a
+  frontier-class model at all.
+- **Tasks where 120B is genuinely better.** Worth 5× the wait for hard
+  reasoning; not worth it for summarising an email.
+- **The gap widens over time.** Today 120B on 16 GB; next year 400B on 32 GB.
+  Model sizes are outgrowing consumer RAM.
+
+This is the weakest part of the case and should stay written down, not
+rationalised away.
 
 ## What this changes
 
