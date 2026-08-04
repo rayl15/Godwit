@@ -127,6 +127,8 @@ public struct Attention {
         encoder.setBytes(&window, length: 4, index: 8)
         encoder.setBytes(&base, length: 4, index: 9)
         encoder.setBytes(&scale, length: 4, index: 10)
+        var ring = UInt32(0)      // standalone path keeps K/V linear
+        encoder.setBytes(&ring, length: 4, index: 11)
         encoder.dispatchThreadgroups(
             MTLSize(width: tokenCount, height: heads, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))

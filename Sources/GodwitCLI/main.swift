@@ -225,13 +225,11 @@ func runAttentionCheck(model: String, reference: String) {
         let rms = max((sumSquares / Float(expected.count)).squareRoot(), 1e-6)
 
         var worst: Float = 0
-        var worstIndex = 0
         var errorSquares: Float = 0
         for i in expected.indices {
             let delta = abs(Float(produced[i]) - expected[i])
             errorSquares += delta * delta
-            let relative = delta / rms
-            if relative > worst { worst = relative; worstIndex = i }
+            worst = max(worst, delta / rms)
         }
         let relativeRMS = (errorSquares / Float(expected.count)).squareRoot() / rms
 
@@ -260,6 +258,79 @@ func runAttentionCheck(model: String, reference: String) {
         }
     } catch {
         FileHandle.standardError.write(Data("attention check failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+func runLayerCheck(model: String, reference: String) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let rope = RoPE(configuration: .gptOSS)
+
+        let refDir = URL(fileURLWithPath: reference)
+        let info = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: refDir.appendingPathComponent("case.json"))) as! [String: Any]
+        let layerIndex = info["layer"] as! Int
+        let tokens = info["tokens"] as! Int
+        let hiddenSize = info["hiddenSize"] as! Int
+        let expectedRouting = info["routing"] as! [[Int]]
+
+        func load<T>(_ name: String, _ count: Int) throws -> [T] {
+            let data = try Data(contentsOf: refDir.appendingPathComponent(name))
+            return data.withUnsafeBytes {
+                Array(UnsafeBufferPointer(start: $0.bindMemory(to: T.self).baseAddress!,
+                                          count: count))
+            }
+        }
+        let hidden: [Float16] = try load("hidden.f16", tokens * hiddenSize)
+        let expected: [Float16] = try load("y.f16", tokens * hiddenSize)
+
+        let layer = TransformerLayer(context: context, reader: reader,
+                                     index: layerIndex, rope: rope)
+        let weights = try layer.loadWeights()
+        let started = Date()
+        let (produced, trace) = try layer.forward(
+            hidden: hidden, tokenCount: tokens, positionBase: 0, weights: weights)
+        let elapsed = Date().timeIntervalSince(started)
+
+        // Routing must match exactly. It is a discrete choice, so any drift
+        // means a different set of experts ran, not a rounding difference.
+        var routingMatches = true
+        for token in 0..<tokens where Array(trace.routing[token].experts) != expectedRouting[token] {
+            routingMatches = false
+            print("routing mismatch at token \(token): "
+                  + "\(trace.routing[token].experts) vs \(expectedRouting[token])")
+        }
+
+        var sumSquares: Float = 0
+        for value in expected { sumSquares += Float(value) * Float(value) }
+        let rms = max((sumSquares / Float(expected.count)).squareRoot(), 1e-6)
+        var worst: Float = 0
+        var errorSquares: Float = 0
+        for i in expected.indices {
+            let delta = abs(Float(produced[i]) - Float(expected[i]))
+            errorSquares += delta * delta
+            worst = max(worst, delta / rms)
+        }
+        let relativeRMS = (errorSquares / Float(expected.count)).squareRoot() / rms
+        let maxAbs = expected.map { abs(Float($0)) }.max() ?? 1
+        let bound = 4 * maxAbs * Float(exp2(-11.0)) / rms
+
+        print("layer \(layerIndex), \(tokens) tokens, \(String(format: "%.2f", elapsed))s")
+        print("routing: \(routingMatches ? "exact match" : "MISMATCH")")
+        print(String(format: "error vs RMS: max %.3e (bound %.3e), RMS %.3e",
+                     worst, bound, relativeRMS))
+        print(String(format: "|y| RMS %.4f, peak %.2f", rms, maxAbs))
+
+        if routingMatches && relativeRMS < 2e-3 && worst < bound {
+            print("\nPASS — full layer matches the NumPy reference")
+        } else {
+            print("\nFAIL — layer diverges")
+            exit(1)
+        }
+    } catch {
+        FileHandle.standardError.write(Data("layer check failed: \(error)\n".utf8))
         exit(1)
     }
 }
@@ -311,6 +382,14 @@ case "trace-routing":
         exit(2)
     }
     runRoutingTrace(model: model, layer: layer, tokens: tokens)
+case "check-layer":
+    let layerArgs = Array(arguments.dropFirst())
+    guard layerArgs.count == 2 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit check-layer <gwt-dir> <reference-dir>\n".utf8))
+        exit(2)
+    }
+    runLayerCheck(model: layerArgs[0], reference: layerArgs[1])
 case "check-attention":
     let attArgs = Array(arguments.dropFirst())
     guard attArgs.count == 2 else {
@@ -349,6 +428,7 @@ case nil:
       install          stream and repack the checkpoint into a .gwt directory
       check-expert     run one installed expert and compare against a reference
       check-attention  run one layer's attention and compare against a reference
+      check-layer      run a complete transformer layer against a reference
       trace-routing    measure real router skew and resulting cache hit rates
     """)
 }

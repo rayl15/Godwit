@@ -33,6 +33,7 @@ kernel void gqa_attention_sinks(
     constant uint      &window     [[buffer(8)]],  // 0 means full attention
     constant uint      &queryBase  [[buffer(9)]],  // absolute position of query 0
     constant float     &scale      [[buffer(10)]],
+    constant uint      &ring       [[buffer(11)]], // ring capacity, 0 = linear
     uint2               group      [[threadgroup_position_in_grid]],
     uint                lane       [[thread_index_in_threadgroup]])
 {
@@ -49,11 +50,15 @@ kernel void gqa_attention_sinks(
     float denominator = 0.0f;
 
     for (uint key = 0; key <= position && key < keyCount; ++key) {
+        // (keyCount is the number of positions written so far, not slots)
         // Sliding layers see only the most recent `window` keys, inclusive of
         // the query's own position.
         if (window != 0 && position - key >= window) { continue; }
 
-        device const half *k = keys + (key * kvHeads + kvHead) * kHeadDim;
+        // Sliding layers store K/V in a ring: a window of 128 needs 128 slots,
+        // not one per position, which is what keeps KV bounded at long context.
+        const uint slot = (ring != 0) ? (key % ring) : key;
+        device const half *k = keys + (slot * kvHeads + kvHead) * kHeadDim;
         float partial = 0.0f;
         for (uint i = 0; i < kPerLane; ++i) {
             const uint index = lane + i * kSimdWidth;
@@ -65,7 +70,7 @@ kernel void gqa_attention_sinks(
         const float rescale = exp(runningMax - updatedMax);
         const float weight = exp(score - updatedMax);
 
-        device const half *v = values + (key * kvHeads + kvHead) * kHeadDim;
+        device const half *v = values + (slot * kvHeads + kvHead) * kHeadDim;
         for (uint i = 0; i < kPerLane; ++i) {
             const uint index = lane + i * kSimdWidth;
             accumulator[i] = accumulator[i] * rescale + weight * float(v[index]);
@@ -117,5 +122,30 @@ kernel void apply_rope(
         const float second = float(vector[i + half_]);
         vector[i] = half(first * cosRow[i] - second * sinRow[i]);
         vector[i + half_] = half(second * cosRow[i] + first * sinRow[i]);
+    }
+}
+
+
+// Writes one run of K/V into the cache at absolute positions, wrapping when the
+// layer uses a ring. Separate from attention so a decode step can append before
+// attending without re-uploading the whole cache.
+kernel void kv_cache_write(
+    device const half *source   [[buffer(0)]],  // [T, KV, D]
+    device half       *cache    [[buffer(1)]],  // [capacity, KV, D]
+    constant uint     &kvHeads  [[buffer(2)]],
+    constant uint     &base     [[buffer(3)]],  // absolute position of token 0
+    constant uint     &ring     [[buffer(4)]],  // 0 = linear
+    uint2              group    [[threadgroup_position_in_grid]],
+    uint               lane     [[thread_index_in_threadgroup]])
+{
+    const uint token = group.x;
+    const uint head = group.y;
+    const uint position = base + token;
+    const uint slot = (ring != 0) ? (position % ring) : position;
+
+    device const half *src = source + (token * kvHeads + head) * kHeadDim;
+    device half *dst = cache + (slot * kvHeads + head) * kHeadDim;
+    for (uint i = lane; i < kHeadDim; i += kSimdWidth) {
+        dst[i] = src[i];
     }
 }

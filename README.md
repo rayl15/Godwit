@@ -70,8 +70,11 @@ What exists:
 - `Attention` — grouped-query attention with sinks and sliding windows, verified
   against NumPy at 1, 8, 32 and 200 tokens
 
-Not started: KV cache reuse across steps, the residual loop over 36 layers,
-tokenizer, sampling.
+- **`TransformerLayer`** — a complete layer, attention and MoE joined by
+  residuals, verified against NumPy with routing matching exactly
+- `KVCache` — FP16, ring-buffered for sliding layers so memory stays bounded
+
+Not started: the loop over 36 layers, tokenizer, sampling.
 
 ### Installing
 
