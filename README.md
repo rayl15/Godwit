@@ -105,8 +105,8 @@ are enough.
 ## Quick start
 
 ```bash
-git clone https://github.com/rayl15/godwit.git
-cd godwit
+git clone https://github.com/rayl15/Godwit.git
+cd Godwit
 swift build -c release
 
 # Stream and repack the checkpoint. ~59 GiB, about 3 hours.
