@@ -7,7 +7,7 @@
 [![license](https://img.shields.io/badge/license-Apache%202.0-22d3ee?style=flat-square&labelColor=101820)](LICENSE)
 [![Swift](https://img.shields.io/badge/Swift-6.2%2B-0891b2?style=flat-square&labelColor=101820)](https://swift.org)
 [![platform](https://img.shields.io/badge/platform-Apple%20Silicon-7d8b9a?style=flat-square&labelColor=101820)](#requirements)
-[![model](https://img.shields.io/badge/model-GPT--OSS--120B-0e5f6b?style=flat-square&labelColor=101820)](https://huggingface.co/openai/gpt-oss-120b)
+[![models](https://img.shields.io/badge/models-GPT--OSS%20%C2%B7%20Qwen3-0e5f6b?style=flat-square&labelColor=101820)](#model-support)
 [![dependencies](https://img.shields.io/badge/dependencies-none-34d399?style=flat-square&labelColor=101820)](Package.swift)
 [![website](https://img.shields.io/badge/website-rayl15.github.io%2FGodwit-101820?style=flat-square&labelColor=101820)](https://rayl15.github.io/Godwit/)
 
@@ -23,6 +23,9 @@ Godwit runs [GPT-OSS-120B](https://huggingface.co/openai/gpt-oss-120b) — 59 Gi
 on disk — on an Apple Silicon Mac with 16 GB of memory, by keeping only the
 shared trunk resident and streaming mixture-of-experts weights from SSD as the
 router asks for them. Swift and Metal, no dependencies.
+
+It also runs GPT-OSS-20B and Qwen3-30B-A3B, from the same binary, switchable at
+runtime. See [model support](#model-support).
 
 ![Chat](docs/assets/chat.png)
 
@@ -115,8 +118,9 @@ Full numbers, including everything that did not work, in
 
 - Apple Silicon Mac, macOS 26+, Swift 6.2+
 - 16 GB of memory
-- ~60 GB of free space on fast internal storage
-- A few hours for the first install
+- Free space on fast internal storage for the model you want: ~60 GB for
+  GPT-OSS-120B, ~17 GB for Qwen3-30B-A3B, ~12 GB for GPT-OSS-20B
+- One to three hours for the first install, depending on the model
 
 Xcode is not required; shaders compile at run time, so the Command Line Tools
 are enough.
@@ -138,7 +142,8 @@ swift build -c release
 .build/release/godwit serve --model model.gwt
 ```
 
-Build the range map (about 3 minutes; the dashboard picks it up automatically):
+Build the range map (a few minutes — 3m44s for Qwen3's 48 layers; the
+dashboard picks it up automatically):
 
 ```bash
 .build/release/godwit range --model model.gwt -o model.gwt/range.json
@@ -231,9 +236,13 @@ the Command Line Tools, Swift Testing needs framework and rpath flags the script
 supplies.
 
 Correctness is checked against NumPy references built from the same installed
-bytes, at every stage: MXFP4 decode, expert feed-forward, attention with sinks,
-a complete layer including exact expert selection, and the tokeniser against
-`tiktoken`.
+bytes, at every stage: MXFP4 decode and encode, expert feed-forward, attention
+both with sinks (GPT-OSS) and with QK-norm and without sinks (Qwen3), a complete
+layer including exact expert selection, and the tokeniser against `tiktoken`.
+
+`verify_install.py` is GPT-OSS-specific — it demands byte equality, which only
+holds when the experts were copied through rather than quantised. Use
+`verify_qwen3.py` for a quantised install.
 
 ## Model support
 
@@ -244,29 +253,29 @@ model is a flag:
 godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 ```
 
-| | 120B | 20B |
-| --- | ---: | ---: |
-| Layers | 36 | 24 |
-| Experts per layer | 128 | 32 |
-| Install size | 58.9 GiB | 11.2 GiB |
-| Resident | 5.7 GiB | 4.1 GiB |
-| Decode | 1.4 tok/s | **2.8–3.2 tok/s** |
+| | GPT-OSS-120B | GPT-OSS-20B | Qwen3-30B-A3B |
+| --- | ---: | ---: | ---: |
+| Layers | 36 | 24 | 48 |
+| Experts per layer | 128 | 32 | 128 |
+| Active per token | 4 | 4 | 8 |
+| Install size | 59.2 GiB | 11.2 GiB | 16.1 GiB |
+| Install time | ~3 h | ~40 min | 105 min |
+| Resident | 5.7 GiB | 4.1 GiB | 2.5 GiB |
+| Decode | 1.4 tok/s | 2.8–3.2 tok/s | **2.3 tok/s** |
+| Time to first token | 10–13 s | ~5 s | 4.5 s |
+| Expert cache hit | ~38% | ~60% | ~32% |
 
-### Qwen3-30B-A3B
+Cache hit rates are for a short single turn and rise as a conversation grows;
+Qwen3's is structurally lower because it routes to eight experts per token
+against GPT-OSS's four, touching twice as many through the same eight slots.
 
-| | GPT-OSS-120B | Qwen3-30B-A3B |
-| --- | ---: | ---: |
-| Install | 59 GB | 16 GB |
-| Install time | ~3 h | 105 min |
-| Decode | 1.4 tok/s | **2.3 tok/s** |
-| Time to first token | 10–13 s | 4.5 s |
-| Expert cache hit | ~60% | 45% |
+### What a second family cost
 
-It answers. The lower cache hit rate is structural: Qwen3 routes to eight
-experts per token against GPT-OSS's four, so it touches twice as many through
-the same eight slots.
+GPT-OSS-20B ran first time with no change beyond declaring the spec, which was a
+narrow result — same family, so tensor naming, RoPE, activation, sinks and
+tokeniser were never exercised.
 
-Getting there took one bug worth recording, because of how it presented. The
+Qwen3 was the actual test. It took one bug worth recording, because of how it presented. The
 model produced fluent English with correct facts and then could not stop —
 asked for the capital of France it would say Paris, doubt itself, and re-derive
 it until the token budget ran out. That looks exactly like quantisation damage,
@@ -301,7 +310,8 @@ individually in [docs/DESIGN.md](docs/DESIGN.md).
 same problem across more model families and more hardware. It is further along
 than this, and worth your attention if you want something to use rather than
 something to read. Godwit differs in being Apple-Silicon-native rather than one
-backend of four, and in supporting GPT-OSS, which colibrì does not.
+backend of four, and in supporting GPT-OSS, which colibrì did not when this was
+last checked — that is a claim about someone else's project and may have aged.
 
 ## Contributing
 
