@@ -51,7 +51,11 @@ public struct TransformerLayer {
             inputNorm: try reader.loadTrunk(section: "layer\(index).input_norm", device: device),
             postNorm: try reader.loadTrunk(section: "layer\(index).post_norm", device: device),
             routerWeight: try reader.loadTrunk(section: "layer\(index).router_w", device: device),
-            routerBias: try reader.loadTrunk(section: "layer\(index).router_b", device: device))
+            // Qwen3's router has no bias. Zeros rather than a second kernel,
+            // for the same reason the attention biases get them.
+            routerBias: reader.manifest.spec.routerBias
+                ? try reader.loadTrunk(section: "layer\(index).router_b", device: device)
+                : try Self.zeroBuffer(count: reader.manifest.expertCount, device: device))
     }
 
     /// What the layer did, for tracing and cache accounting.
@@ -229,5 +233,17 @@ public struct TransformerLayer {
             }
         }
         return out
+    }
+}
+
+extension TransformerLayer {
+    /// A zero-filled BF16 buffer, for a bias the model does not have.
+    static func zeroBuffer(count: Int, device: MTLDevice) throws -> MTLBuffer {
+        guard let buffer = device.makeBuffer(length: max(count * 2, 4),
+                                             options: .storageModeShared) else {
+            throw ExpertBlobError.missingSection("zero bias buffer")
+        }
+        memset(buffer.contents(), 0, buffer.length)
+        return buffer
     }
 }

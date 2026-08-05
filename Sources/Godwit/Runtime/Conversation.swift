@@ -34,8 +34,53 @@ public struct Conversation {
         messages = keepingSystem ? messages.filter { $0.role == .system } : []
     }
 
+    /// Which turn markers a family uses.
+    public enum Format: String, Sendable, Codable {
+        /// GPT-OSS: `<|start|>role<|message|>content<|end|>`, with analysis and
+        /// final channels inside the assistant turn.
+        case harmony
+        /// Qwen3 and most others: `<|im_start|>role\ncontent<|im_end|>`.
+        case chatML
+
+        /// The format a checkpoint uses, inferred from what its tokeniser has.
+        ///
+        /// Read from the vocabulary rather than declared in the spec: the
+        /// tokeniser travels with the weights, so it cannot disagree with them,
+        /// whereas a flag can be set wrong.
+        public static func detect(_ tokenizer: Tokenizer) -> Format {
+            tokenizer.id(of: "<|start|>") != nil ? .harmony : .chatML
+        }
+    }
+
     /// Encodes the conversation and opens an assistant turn for the model.
     public func encode(with tokenizer: Tokenizer) throws -> [Int] {
+        switch Format.detect(tokenizer) {
+        case .harmony: return try encodeHarmony(with: tokenizer)
+        case .chatML: return try encodeChatML(with: tokenizer)
+        }
+    }
+
+    /// `<|im_start|>role\ncontent<|im_end|>\n`, ending with an open assistant
+    /// turn for the model to complete.
+    private func encodeChatML(with tokenizer: Tokenizer) throws -> [Int] {
+        guard let imStart = tokenizer.id(of: "<|im_start|>"),
+              let imEnd = tokenizer.id(of: "<|im_end|>") else {
+            throw TokenizerError.malformed("missing ChatML tokens")
+        }
+        var ids: [Int] = []
+        for entry in messages {
+            ids.append(imStart)
+            ids.append(contentsOf: tokenizer.encode(entry.role.rawValue + "\n"))
+            ids.append(contentsOf: tokenizer.encode(entry.content))
+            ids.append(imEnd)
+            ids.append(contentsOf: tokenizer.encode("\n"))
+        }
+        ids.append(imStart)
+        ids.append(contentsOf: tokenizer.encode("assistant\n"))
+        return ids
+    }
+
+    private func encodeHarmony(with tokenizer: Tokenizer) throws -> [Int] {
         func special(_ name: String) throws -> Int {
             guard let id = tokenizer.id(of: name) else {
                 throw TokenizerError.malformed("missing special token \(name)")
@@ -62,7 +107,8 @@ public struct Conversation {
 
     /// Tokens that end an assistant turn.
     public static func stopTokens(_ tokenizer: Tokenizer) -> Set<Int> {
-        Set(["<|return|>", "<|endoftext|>"].compactMap { tokenizer.id(of: $0) })
+        Set(["<|return|>", "<|endoftext|>", "<|im_end|>"]
+            .compactMap { tokenizer.id(of: $0) })
     }
 
     /// Extracts the `final` channel from a harmony reply, discarding the
@@ -72,6 +118,19 @@ public struct Conversation {
     /// noise for a user reading an answer, so it is separated rather than
     /// stripped.
     public static func split(_ reply: String) -> (analysis: String?, final: String) {
+        // Qwen3 marks reasoning with <think> rather than harmony channels, and
+        // emits plain text otherwise.
+        if reply.contains("<think>") || reply.contains("</think>") {
+            if let close = reply.range(of: "</think>") {
+                let thought = reply[..<close.lowerBound]
+                    .replacingOccurrences(of: "<think>", with: "")
+                return (thought.trimmingCharacters(in: .whitespacesAndNewlines),
+                        String(reply[close.upperBound...])
+                            .trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return (reply.replacingOccurrences(of: "<think>", with: ""), "")
+        }
+
         func channel(_ name: String) -> String? {
             guard let head = reply.range(of: "<|channel|>\(name)<|message|>") else { return nil }
             let rest = reply[head.upperBound...]

@@ -31,11 +31,19 @@ public struct Attention {
         public let kBias: MTLBuffer
         public let vBias: MTLBuffer
         public let oBias: MTLBuffer
+        /// Per-head RMSNorm weights applied to q and k before RoPE. Qwen3 has
+        /// these; GPT-OSS does not, and nil means the step is skipped rather
+        /// than performed with an identity weight.
+        public let qNorm: MTLBuffer?
+        public let kNorm: MTLBuffer?
 
         public init(qCodes: MTLBuffer, kCodes: MTLBuffer, vCodes: MTLBuffer,
                     oCodes: MTLBuffer, sinks: MTLBuffer,
                     qBias: MTLBuffer, kBias: MTLBuffer,
-                    vBias: MTLBuffer, oBias: MTLBuffer) {
+                    vBias: MTLBuffer, oBias: MTLBuffer,
+                    qNorm: MTLBuffer? = nil, kNorm: MTLBuffer? = nil) {
+            self.qNorm = qNorm
+            self.kNorm = kNorm
             self.qCodes = qCodes
             self.kCodes = kCodes
             self.vCodes = vCodes
@@ -51,16 +59,47 @@ public struct Attention {
     public static func loadWeights(
         reader: ModelReader, layer: Int, device: MTLDevice
     ) throws -> Weights {
-        Weights(
+        let spec = reader.manifest.spec
+
+        /// A model without projection biases still goes through a kernel that
+        /// adds one, so it gets zeros rather than a second kernel.
+        func zeros(_ count: Int) throws -> MTLBuffer {
+            guard let buffer = device.makeBuffer(length: max(count * 2, 4),
+                                                 options: .storageModeShared) else {
+                throw ExpertBlobError.missingSection("zero bias buffer")
+            }
+            memset(buffer.contents(), 0, buffer.length)
+            return buffer
+        }
+        func optional(_ name: String) throws -> MTLBuffer? {
+            reader.manifest.trunkSections.contains { $0.name == name }
+                ? try reader.loadTrunk(section: name, device: device) : nil
+        }
+
+        let heads = spec.attentionHeads, kvHeads = spec.keyValueHeads
+        let dim = spec.headDimension
+        return Weights(
             qCodes: try reader.loadTrunk(section: "layer\(layer).q_proj", device: device),
             kCodes: try reader.loadTrunk(section: "layer\(layer).k_proj", device: device),
             vCodes: try reader.loadTrunk(section: "layer\(layer).v_proj", device: device),
             oCodes: try reader.loadTrunk(section: "layer\(layer).o_proj", device: device),
-            sinks: try reader.loadTrunk(section: "layer\(layer).sinks", device: device),
-            qBias: try reader.loadTrunk(section: "layer\(layer).q_bias", device: device),
-            kBias: try reader.loadTrunk(section: "layer\(layer).k_bias", device: device),
-            vBias: try reader.loadTrunk(section: "layer\(layer).v_bias", device: device),
-            oBias: try reader.loadTrunk(section: "layer\(layer).o_bias", device: device))
+            sinks: spec.attentionSinks
+                ? try reader.loadTrunk(section: "layer\(layer).sinks", device: device)
+                : try zeros(heads),
+            qBias: spec.attentionBias
+                ? try reader.loadTrunk(section: "layer\(layer).q_bias", device: device)
+                : try zeros(heads * dim),
+            kBias: spec.attentionBias
+                ? try reader.loadTrunk(section: "layer\(layer).k_bias", device: device)
+                : try zeros(kvHeads * dim),
+            vBias: spec.attentionBias
+                ? try reader.loadTrunk(section: "layer\(layer).v_bias", device: device)
+                : try zeros(kvHeads * dim),
+            oBias: spec.attentionBias
+                ? try reader.loadTrunk(section: "layer\(layer).o_bias", device: device)
+                : try zeros(spec.hiddenSize),
+            qNorm: try optional("layer\(layer).q_norm"),
+            kNorm: try optional("layer\(layer).k_norm"))
     }
 
     /// Projects, rotates, attends, and projects back for a run of tokens.
@@ -103,6 +142,18 @@ public struct Attention {
                              bias: weights.vBias, output: v,
                              rows: kvWidth, cols: spec.hiddenSize, tokens: tokenCount)
 
+        // Qwen3 RMS-normalises each head of q and k before rotating them.
+        // Before RoPE, not after: the norm is over the head's own values, and
+        // rotating first would mix positions into the statistic.
+        if let qNorm = weights.qNorm {
+            try encodeHeadNorm(commands, values: q, weight: qNorm,
+                               heads: tokenCount * heads)
+        }
+        if let kNorm = weights.kNorm {
+            try encodeHeadNorm(commands, values: k, weight: kNorm,
+                               heads: tokenCount * kvHeads)
+        }
+
         // Rotate Q and K. V is deliberately untouched: position information
         // belongs in the similarity, not in the payload.
         let (cosBuffer, sinBuffer) = try ropeTables(tokenCount: tokenCount,
@@ -117,8 +168,9 @@ public struct Attention {
         let layerCache = cache.layers[layer]
 
         let attended = try context.emptyBuffer(of: Float16.self, count: tokenCount * qWidth)
-        let pipeline = try context.pipeline(shader: "attention", function: "gqa_attention_sinks",
-                                            constants: [0: spec.headDimension])
+        let pipeline = try context.pipeline(
+            shader: "attention", function: "gqa_attention_sinks",
+            constants: [0: spec.headDimension], booleanConstants: [1: spec.attentionSinks])
         guard let encoder = commands.makeComputeCommandEncoder() else {
             throw MetalError.encoderCreationFailed
         }
@@ -186,6 +238,24 @@ public struct Attention {
         encoder.dispatchThreadgroups(
             MTLSize(width: rows, height: tokens, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// RMS-normalises every head in place, one threadgroup per head.
+    private func encodeHeadNorm(
+        _ commands: MTLCommandBuffer, values: MTLBuffer, weight: MTLBuffer, heads: Int
+    ) throws {
+        let pipeline = try context.pipeline(shader: "expert", function: "qk_head_rmsnorm")
+        guard let encoder = commands.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(values, offset: 0, index: 0)
+        encoder.setBuffer(weight, offset: 0, index: 1)
+        var dim = UInt32(spec.headDimension)
+        var epsilon = spec.rmsNormEpsilon
+        encoder.setBytes(&dim, length: 4, index: 2)
+        encoder.setBytes(&epsilon, length: 4, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: heads, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

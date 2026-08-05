@@ -20,6 +20,16 @@ constant constexpr uint kSimdWidth = 32;
 // numbers rather than an error. Supplied at pipeline build time, so the loops
 // below still unroll against a compile-time value.
 constant uint FC_HEAD_DIM [[function_constant(0)]];
+// Whether this model has learned attention sinks at all.
+//
+// A function constant rather than a uniform, and rather than passing zeros:
+// the sink enters the denominator as exp(sink - max), so a sink of 0.0 is not
+// a no-op — it adds a whole unit of mass to every row. Qwen3 has no sinks, and
+// feeding it zeros would have run and been quietly wrong.
+constant bool FC_HAS_SINKS [[function_constant(1)]];
+static inline bool hasSinks() {
+    return is_function_constant_defined(FC_HAS_SINKS) ? FC_HAS_SINKS : true;
+}
 inline uint headDimension() {
     return is_function_constant_defined(FC_HEAD_DIM) ? FC_HEAD_DIM : 64u;
 }
@@ -96,7 +106,7 @@ kernel void gqa_attention_sinks(
 
     // The sink joins the denominator only. No value is accumulated, which is
     // precisely what lets a head decline to attend.
-    {
+    if (hasSinks()) {
         const float sink = float(sinks[head]);
         const float updatedMax = max(runningMax, sink);
         const float rescale = exp(runningMax - updatedMax);

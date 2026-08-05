@@ -18,7 +18,7 @@ public struct ModelRunner {
         self.context = context
         self.reader = reader
         self.spec = reader.manifest.spec
-        let rope = RoPE(configuration: .gptOSS)
+        let rope = RoPE(configuration: .forSpec(reader.manifest.spec))
         self.rope = rope
         self.layers = (0..<reader.manifest.layerCount).map {
             TransformerLayer(context: context, reader: reader, index: $0, rope: rope)

@@ -8,6 +8,19 @@ import Metal
 /// design exists: it is ~25M quantised weights that are needed for one token and
 /// then likely not again for a while.
 public struct ExpertRunner {
+    /// Which activation kernel this model's experts use.
+    ///
+    /// GPT-OSS's clamped GLU and plain SwiGLU differ by a clamp, a `+1` shift
+    /// and a sigmoid steepness. Every one of those runs silently if wrong, so
+    /// the choice is driven by the spec rather than by a default.
+    private var activationFunction: String {
+        switch reader.manifest.spec.activation {
+        case .gptOssClampedGLU: return "gptoss_expert_activation"
+        case .silu: return "expert_activation_swiglu"
+        case .geluTanh: return "expert_activation_swiglu"
+        }
+    }
+
     public let context: MetalContext
     public let reader: ModelReader
     public let hiddenSize: Int
@@ -109,7 +122,7 @@ public struct ExpertRunner {
             shader: "expert",
             function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
         let activation = try context.pipeline(shader: "expert",
-                                              function: "gptoss_expert_activation")
+                                              function: activationFunction)
         let accumulate = try context.pipeline(shader: "expert", function: "expert_accumulate")
 
         guard let commands = context.queue.makeCommandBuffer() else {
@@ -196,7 +209,7 @@ public struct ExpertRunner {
             shader: "expert",
             function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
         let activation = try context.pipeline(shader: "expert",
-                                              function: "gptoss_expert_activation")
+                                              function: activationFunction)
         let accumulate = try context.pipeline(shader: "expert", function: "expert_accumulate")
 
         guard let commands = context.queue.makeCommandBuffer() else {
@@ -279,7 +292,7 @@ public struct ExpertRunner {
             shader: "expert",
             function: usePersistentKernel ? "mxfp4_gemv_bias_multirow" : "mxfp4_gemv_bias")
         let activation = try context.pipeline(shader: "expert",
-                                              function: "gptoss_expert_activation")
+                                              function: activationFunction)
 
         guard let commands = context.queue.makeCommandBuffer() else {
             throw MetalError.encoderCreationFailed

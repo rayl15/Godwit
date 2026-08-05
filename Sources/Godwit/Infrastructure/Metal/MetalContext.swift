@@ -84,12 +84,16 @@ public final class MetalContext {
     /// time constant to the shader compiler, so loops still unroll, where the
     /// same value passed in a buffer would not.
     public func pipeline(
-        shader: String, function: String, constants: [Int: Int] = [:]
+        shader: String, function: String, constants: [Int: Int] = [:],
+        booleanConstants: [Int: Bool] = [:]
     ) throws -> MTLComputePipelineState {
-        let key = constants.isEmpty
+        let key = constants.isEmpty && booleanConstants.isEmpty
             ? "\(shader).\(function)"
-            : "\(shader).\(function)[" + constants.sorted { $0.key < $1.key }
-                .map { "\($0.key)=\($0.value)" }.joined(separator: ",") + "]"
+            : "\(shader).\(function)["
+                + (constants.sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value)" }
+                 + booleanConstants.sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value)" }).joined(separator: ",") + "]"
         lock.lock()
         if let cached = pipelines[key] {
             lock.unlock()
@@ -99,7 +103,7 @@ public final class MetalContext {
 
         let library = try library(named: shader)
         let kernel: MTLFunction
-        if constants.isEmpty {
+        if constants.isEmpty && booleanConstants.isEmpty {
             guard let plain = library.makeFunction(name: function) else {
                 throw MetalError.functionNotFound(shader: shader, function: function)
             }
@@ -109,6 +113,10 @@ public final class MetalContext {
             for (index, value) in constants {
                 var scalar = UInt32(value)
                 values.setConstantValue(&scalar, type: .uint, index: index)
+            }
+            for (index, value) in booleanConstants {
+                var flag = value
+                values.setConstantValue(&flag, type: .bool, index: index)
             }
             kernel = try library.makeFunction(name: function, constantValues: values)
         }

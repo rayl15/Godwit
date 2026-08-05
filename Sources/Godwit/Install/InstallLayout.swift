@@ -62,11 +62,19 @@ public struct ExpertLayout: Sendable, Equatable {
             .gateUpScales: gateUpRows * blocksPerRow,
             .downBlocks: downRows * (intermediateSize / MXFP4.blockSize) * MXFP4.packedBytesPerBlock,
             .downScales: downRows * (intermediateSize / MXFP4.blockSize),
-            // Qwen3 has no expert biases. Zero-length rather than absent keeps
-            // the section list the same shape for every family, so the reader
-            // needs no special case — it just never reads them.
-            .gateUpBias: expertBias ? gateUpRows * 2 : 0,        // BF16
-            .downBias: expertBias ? downRows * 2 : 0,            // BF16
+            // Always allocated, even for a family with no expert biases.
+            // Qwen3 has none, and the tempting move is to give them zero
+            // length — but the kernel adds a bias unconditionally, and a
+            // zero-length section leaves it reading whatever alignment padding
+            // happens to follow, which is not guaranteed to be long enough or
+            // to be zero.
+            //
+            // Allocating and never writing costs two pages per expert, 201 MB
+            // on the 30B, or 1.2% of the install. The file is created sparse,
+            // so those pages read as zeros and cost nothing on disk until
+            // touched. Cheaper than a branch in the hot read path.
+            .gateUpBias: gateUpRows * 2,        // BF16
+            .downBias: downRows * 2,            // BF16
         ]
 
         // Each section starts page-aligned so a read of one never shares a page
@@ -74,7 +82,6 @@ public struct ExpertLayout: Sendable, Equatable {
         var offsets: [Section: Int] = [:]
         var cursor = 0
         for section in Section.allCases {
-            guard sizes[section]! > 0 else { offsets[section] = cursor; continue }
             cursor = Self.alignUp(cursor)
             offsets[section] = cursor
             cursor += sizes[section]!

@@ -35,6 +35,35 @@ public struct RoPE {
             Configuration(headDimension: 64, theta: 150_000, scalingFactor: 32,
                           originalContextLength: 4096, betaFast: 32, betaSlow: 1)
         }
+
+        /// Rotary embeddings with no frequency correction at all.
+        ///
+        /// Qwen3 sets `rope_scaling: null` — it was trained at its full 40,960
+        /// context and needs no extension. A scaling factor of 1 makes every
+        /// YaRN term collapse: interpolated equals base, so the ramp blends a
+        /// value with itself, and `attentionScale` is already guarded at 1.
+        /// So this is the same code path arriving at plain RoPE, rather than a
+        /// second implementation to keep in step.
+        public static func plain(headDimension: Int, theta: Float,
+                                 contextLength: Int) -> Configuration {
+            Configuration(headDimension: headDimension, theta: theta,
+                          scalingFactor: 1, originalContextLength: contextLength,
+                          betaFast: 32, betaSlow: 1)
+        }
+
+        /// The configuration a model's own spec implies.
+        public static func forSpec(_ spec: ArchitectureSpec) -> Configuration {
+            // GPT-OSS is the only family here that was extended after training,
+            // so it is the only one carrying a YaRN block.
+            if spec.activation == .gptOssClampedGLU {
+                return Configuration(headDimension: spec.headDimension,
+                                     theta: spec.ropeTheta, scalingFactor: 32,
+                                     originalContextLength: 4096,
+                                     betaFast: 32, betaSlow: 1)
+            }
+            return .plain(headDimension: spec.headDimension,
+                          theta: spec.ropeTheta, contextLength: 40_960)
+        }
     }
 
     public let configuration: Configuration

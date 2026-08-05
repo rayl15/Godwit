@@ -366,3 +366,57 @@ kernel void mxfp4_gemv_bias_multirow(
         }
     }
 }
+
+// Plain SwiGLU: silu(gate) * up. What Qwen3 actually computes, and what
+// `hidden_act: "silu"` means everywhere except GPT-OSS.
+//
+// The differences from `gptoss_expert_activation` are all load-bearing: no
+// clamping, no `+1` shift on `up`, and the sigmoid has no alpha. Reusing the
+// GPT-OSS kernel with alpha=1 would still leave the shift and the clamp, and
+// would run without complaint.
+//
+// The interleaved gate/up order is shared, because the installer writes Qwen3's
+// separate tensors into that order rather than teaching this a second layout.
+kernel void expert_activation_swiglu(
+    device const float *gate_up [[buffer(0)]],   // 2 * F, interleaved
+    device half        *out     [[buffer(1)]],   // F
+    constant uint      &width   [[buffer(2)]],   // F
+    uint                index   [[thread_position_in_grid]])
+{
+    if (index >= width) { return; }
+
+    const float gate = gate_up[index * 2u];
+    const float up   = gate_up[index * 2u + 1u];
+
+    const float silu = gate * (1.0f / (1.0f + exp(-gate)));
+    out[index] = half(silu * up);
+}
+
+// RMS-normalises each head of q or k before RoPE, as Qwen3 does.
+//
+// Applied per head over head_dim, not over the whole projected vector: the
+// weight is head_dim wide and shared across heads. Normalising across the full
+// row instead would run, produce plausible numbers, and be wrong.
+kernel void qk_head_rmsnorm(
+    device half        *values   [[buffer(0)]],   // tokens * heads * head_dim
+    device const half  *weight   [[buffer(1)]],   // head_dim
+    constant uint      &headDim  [[buffer(2)]],
+    constant float     &epsilon  [[buffer(3)]],
+    uint                head     [[threadgroup_position_in_grid]],
+    uint                lane     [[thread_position_in_threadgroup]],
+    uint                width    [[threads_per_threadgroup]])
+{
+    device half *row = values + head * headDim;
+
+    float sum = 0.0f;
+    for (uint i = lane; i < headDim; i += width) {
+        const float v = float(row[i]);
+        sum += v * v;
+    }
+    sum = simd_sum(sum);
+    const float inverse = rsqrt(sum / float(headDim) + epsilon);
+
+    for (uint i = lane; i < headDim; i += width) {
+        row[i] = half(float(row[i]) * inverse * float(weight[i]));
+    }
+}
