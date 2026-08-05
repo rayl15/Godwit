@@ -4,3 +4,6 @@ scratch/
 *.gwt/
 .DS_Store
 Package.resolved
+
+# Copied from docs/assets at publish time; see .github/workflows/pages.yml
+site/assets/

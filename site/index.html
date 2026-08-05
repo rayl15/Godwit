@@ -8,10 +8,10 @@
 <meta property="og:title" content="Godwit — max range, min payload">
 <meta property="og:description" content="A 120-billion-parameter model on a 16 GB laptop. Swift + Metal, no dependencies.">
 <meta property="og:image" content="https://rayl15.github.io/Godwit/assets/range.png">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230b0c0e'/><rect x='3' y='7' width='8' height='4' fill='%23d98b4a'/><rect x='9' y='4' width='2' height='3' fill='%23e8a768'/><rect x='11' y='2' width='2' height='2' fill='%238b8783'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23080b0f'/><rect x='3' y='7' width='8' height='4' fill='%2322d3ee'/><rect x='9' y='4' width='2' height='3' fill='%2367e8f9'/><rect x='11' y='2' width='2' height='2' fill='%237d8b9a'/></svg>">
 <style>
-:root{--bg:#0b0c0e;--panel:#131519;--line:#23262c;--text:#e8e6e3;--dim:#8b8783;
-      --faint:#55524f;--accent:#d98b4a;--accent-dim:#6b4526;--good:#6dc46d}
+:root{--bg:#080b0f;--panel:#10151c;--line:#1e2630;--text:#e6edf3;--dim:#7d8b9a;
+      --faint:#4a5764;--accent:#22d3ee;--accent-dim:#0e5f6b;--good:#34d399}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--text);
@@ -34,9 +34,9 @@ h1{font-size:clamp(22px,3.4vw,34px);line-height:1.3;margin:0 0 18px;font-weight:
 h1 em{font-style:normal;color:var(--accent)}
 .lede{color:var(--dim);max-width:660px;margin:0 auto 28px}
 .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-.btn{border:1px solid var(--accent-dim);background:#1a1512;color:var(--text);
+.btn{border:1px solid var(--accent-dim);background:#0d2b31;color:var(--text);
      padding:9px 20px;font:inherit;font-size:14px}
-.btn:hover{background:#22190f;text-decoration:none}
+.btn:hover{background:#124048;text-decoration:none}
 .btn.ghost{background:none;border-color:var(--line);color:var(--dim)}
 
 section{padding:64px 0;border-bottom:1px solid var(--line)}
@@ -71,7 +71,7 @@ code{color:var(--accent)}
 pre code{color:var(--text)}
 pre .c{color:var(--faint)}
 
-#sky{width:100%;height:min(62vh,560px);display:block;background:#08090b;
+#sky{width:100%;height:min(62vh,560px);display:block;background:#06090d;
      border:1px solid var(--line);cursor:grab}
 #sky:active{cursor:grabbing}
 .legend{display:flex;flex-wrap:wrap;gap:9px 16px;margin:14px 0 0;
@@ -269,9 +269,9 @@ swift build -c release
 </div></footer>
 
 <script>
-const COLOURS={python:'#4a9eda',sql:'#5ec8c8',math:'#d98b4a',poetry:'#d95a9e',
-  legal:'#b07fd9',medical:'#6dc46d',chinese:'#e05c5c',japanese:'#e8a13c',
-  russian:'#8fa8d9',json:'#c8c85e',chat:'#9b9b9b',history:'#c07a4a'};
+const COLOURS={python:'#60a5fa',sql:'#a3e635',math:'#fbbf24',poetry:'#f472b6',
+  legal:'#c084fc',medical:'#34d399',chinese:'#fb7185',japanese:'#fb923c',
+  russian:'#818cf8',json:'#2dd4bf',chat:'#94a3b8',history:'#d6a77a'};
 let R=null,spin={x:-.28,y:.7},zoom=1.7,drag=null;
 const sky=document.getElementById('sky');
 
@@ -287,11 +287,11 @@ function draw(){
   const dpr=devicePixelRatio||1,w=sky.clientWidth,h=sky.clientHeight;
   sky.width=w*dpr; sky.height=h*dpr;
   const g=sky.getContext('2d'); g.scale(dpr,dpr);
-  g.fillStyle='#08090b'; g.fillRect(0,0,w,h);
+  g.fillStyle='#06090d'; g.fillRect(0,0,w,h);
   const pts=R.points.map(p=>({p,v:project(p,w,h)})).sort((a,b)=>b.v.z-a.v.z);
   for(const d of pts){
     g.globalAlpha=.25+d.p.s*.75;
-    g.fillStyle=COLOURS[R.topics[d.p.t]]||'#777';
+    g.fillStyle=COLOURS[R.topics[d.p.t]]||'#64748b';
     g.beginPath(); g.arc(d.v.sx,d.v.sy,Math.max(.5,(0.7+d.p.s*2.6)*d.v.d*zoom),0,6.2832); g.fill();
   }
   g.globalAlpha=1; g.font='11px ui-monospace,Menlo,monospace';
@@ -302,7 +302,7 @@ function draw(){
     const v=project({x:cx/m.length,y:cy/m.length,z:cz/m.length},w,h);
     const tw=g.measureText(topic).width;
     g.fillStyle='rgba(8,9,11,.82)'; g.fillRect(v.sx+4,v.sy-14,tw+6,15);
-    g.fillStyle=COLOURS[topic]||'#aaa'; g.fillText(topic,v.sx+7,v.sy-3);
+    g.fillStyle=COLOURS[topic]||'#94a3b8'; g.fillText(topic,v.sx+7,v.sy-3);
     g.beginPath(); g.arc(v.sx,v.sy,2.5,0,6.2832); g.fill();
   });
 }
@@ -328,7 +328,7 @@ fetch('range.json').then(r=>r.json()).then(d=>{
   d.topics.forEach((t,i)=>{
     const c=d.points.filter(p=>p.t===i&&p.s>.35).length;
     const el=document.createElement('span');
-    el.innerHTML='<i class="dot" style="background:'+(COLOURS[t]||'#777')+'"></i>'+t+' '+c;
+    el.innerHTML='<i class="dot" style="background:'+(COLOURS[t]||'#64748b')+'"></i>'+t+' '+c;
     lg.appendChild(el);
   });
   document.getElementById('meta').textContent=

@@ -2,14 +2,14 @@
 
 <img src="docs/assets/banner.svg" alt="Godwit — max range, min payload" width="660">
 
-[![ci](https://img.shields.io/github/actions/workflow/status/rayl15/Godwit/ci.yml?branch=main&style=flat-square&label=build&labelColor=2b2622&color=6dc46d)](https://github.com/rayl15/Godwit/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/rayl15/Godwit?style=flat-square&labelColor=2b2622&color=d98b4a)](https://github.com/rayl15/Godwit/releases)
-[![license](https://img.shields.io/badge/license-Apache%202.0-d98b4a?style=flat-square&labelColor=2b2622)](LICENSE)
-[![Swift](https://img.shields.io/badge/Swift-6.2%2B-a8632f?style=flat-square&labelColor=2b2622)](https://swift.org)
-[![platform](https://img.shields.io/badge/platform-Apple%20Silicon-8b8783?style=flat-square&labelColor=2b2622)](#requirements)
-[![model](https://img.shields.io/badge/model-GPT--OSS--120B-6b4526?style=flat-square&labelColor=2b2622)](https://huggingface.co/openai/gpt-oss-120b)
-[![dependencies](https://img.shields.io/badge/dependencies-none-6dc46d?style=flat-square&labelColor=2b2622)](Package.swift)
-[![website](https://img.shields.io/badge/website-rayl15.github.io%2FGodwit-2b2622?style=flat-square&labelColor=2b2622)](https://rayl15.github.io/Godwit/)
+[![ci](https://img.shields.io/github/actions/workflow/status/rayl15/Godwit/ci.yml?branch=main&style=flat-square&label=build&labelColor=101820&color=34d399)](https://github.com/rayl15/Godwit/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/rayl15/Godwit?style=flat-square&labelColor=101820&color=22d3ee)](https://github.com/rayl15/Godwit/releases)
+[![license](https://img.shields.io/badge/license-Apache%202.0-22d3ee?style=flat-square&labelColor=101820)](LICENSE)
+[![Swift](https://img.shields.io/badge/Swift-6.2%2B-0891b2?style=flat-square&labelColor=101820)](https://swift.org)
+[![platform](https://img.shields.io/badge/platform-Apple%20Silicon-7d8b9a?style=flat-square&labelColor=101820)](#requirements)
+[![model](https://img.shields.io/badge/model-GPT--OSS--120B-0e5f6b?style=flat-square&labelColor=101820)](https://huggingface.co/openai/gpt-oss-120b)
+[![dependencies](https://img.shields.io/badge/dependencies-none-34d399?style=flat-square&labelColor=101820)](Package.swift)
+[![website](https://img.shields.io/badge/website-rayl15.github.io%2FGodwit-101820?style=flat-square&labelColor=101820)](https://rayl15.github.io/Godwit/)
 
 **Run a 120-billion-parameter model on a 16 GB laptop.**
 
@@ -184,11 +184,11 @@ flowchart TD
     E -. "overlapped" .-> F
     F --> G
 
-    classDef resident fill:#1a2733,stroke:#4a9eda,stroke-width:2px,color:#e8e6e3
-    classDef cpu fill:#26231f,stroke:#8b8783,stroke-width:2px,color:#e8e6e3
-    classDef hit fill:#1a2b1e,stroke:#6dc46d,stroke-width:2px,color:#e8e6e3
-    classDef miss fill:#2b1d12,stroke:#d98b4a,stroke-width:2px,color:#e8e6e3
-    classDef exec fill:#241a2b,stroke:#b07fd9,stroke-width:2px,color:#e8e6e3
+    classDef resident fill:#0e2430,stroke:#38bdf8,stroke-width:2px,color:#e6edf3
+    classDef cpu fill:#1a1f28,stroke:#7d8b9a,stroke-width:2px,color:#e6edf3
+    classDef hit fill:#0d2a22,stroke:#34d399,stroke-width:2px,color:#e6edf3
+    classDef miss fill:#0d2b31,stroke:#22d3ee,stroke-width:2px,color:#e6edf3
+    classDef exec fill:#1e1b33,stroke:#818cf8,stroke-width:2px,color:#e6edf3
 
     class A,B,G resident
     class C cpu

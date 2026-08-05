@@ -17,9 +17,14 @@ enum WebUI {
         <title>Godwit</title>
         <style>
         :root {
-          --bg: #0b0c0e; --panel: #131519; --line: #23262c;
-          --text: #e8e6e3; --dim: #8b8783; --faint: #55524f;
-          --accent: #d98b4a; --accent-dim: #6b4526; --good: #7fb069;
+          --bg: #080b0f; --panel: #10151c; --line: #1e2630;
+          --text: #e6edf3; --dim: #7d8b9a; --faint: #4a5764;
+          --accent: #22d3ee; --accent-dim: #0e5f6b; --good: #34d399;
+          /* The decay trail in the expert grid is its own colour, not a reuse
+             of --accent-dim. The grid's whole claim is that ~3% of cells fire
+             per token, so the trail has to sit close to the unlit cell or the
+             view says the opposite of what it means. */
+          --trail: #10333c;
         }
         * { box-sizing: border-box; }
         body {
@@ -58,7 +63,7 @@ enum WebUI {
           padding: 5px 14px; background: none; border: 1px solid transparent;
           color: var(--dim); font: inherit; cursor: pointer;
         }
-        .tab.on { color: var(--accent); border-color: var(--accent-dim); background: #1a1512; }
+        .tab.on { color: var(--accent); border-color: var(--accent-dim); background: #0d2b31; }
         .pill {
           margin-left: auto; display: flex; gap: 14px; color: var(--dim); font-size: 11px;
         }
@@ -75,7 +80,7 @@ enum WebUI {
         footer { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 16px; }
         .composer { display: flex; gap: 10px; max-width: 780px; }
         textarea {
-          flex: 1; background: #0e1013; border: 1px solid var(--line); color: var(--text);
+          flex: 1; background: #0c1117; border: 1px solid var(--line); color: var(--text);
           font: inherit; padding: 9px 11px; resize: none; height: 40px; outline: none;
         }
         textarea:focus { border-color: var(--accent-dim); }
@@ -91,10 +96,10 @@ enum WebUI {
                 height: min(64vh, 640px); }
         .col { background: var(--bg); display: grid; gap: 1px;
                grid-template-rows: repeat(%EXPERTS%, 1fr); height: 100%; }
-        .cell { background: #16181c; min-height: 1px; }
+        .cell { background: #141b24; min-height: 1px; }
         .swatch.cell { min-height: 0; }
         .cell.hot { background: var(--accent); }
-        .cell.warm { background: var(--accent-dim); }
+        .cell.warm { background: var(--trail); }
         .axis { display: flex; justify-content: space-between; color: var(--faint);
                 font-size: 10px; margin-top: 6px; }
         .legend { display: flex; gap: 16px; margin-bottom: 12px;
@@ -111,7 +116,7 @@ enum WebUI {
           color: var(--faint);
         }
         #model {
-          appearance: none; background: #0e1013 no-repeat right 8px center/8px 5px;
+          appearance: none; background: #0c1117 no-repeat right 8px center/8px 5px;
           background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
                             linear-gradient(135deg, var(--dim) 50%, transparent 50%);
           background-position: right 13px center, right 8px center;
@@ -128,7 +133,7 @@ enum WebUI {
         #install-progress .bar { width: 90px; height: 3px; background: var(--line); }
         #install-progress .bar div { height: 100%; background: var(--accent); width: 0 }
         #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
-               background: #08090b; border: 1px solid var(--line); }
+               background: #06090d; border: 1px solid var(--line); }
         #sky:active { cursor: grabbing; }
         #range-legend { flex-wrap: wrap; gap: 10px 16px; }
         #range-legend span { display: flex; align-items: center; gap: 5px; }
@@ -354,9 +359,9 @@ enum WebUI {
         // Colours are categorical and deliberately distinguishable on black;
         // they carry meaning (topic), so they must not be a gradient.
         const TOPIC_COLOURS = {
-          python:'#4a9eda', sql:'#5ec8c8', math:'#d98b4a', poetry:'#d95a9e',
-          legal:'#b07fd9', medical:'#6dc46d', chinese:'#e05c5c', japanese:'#e8a13c',
-          russian:'#8fa8d9', json:'#c8c85e', chat:'#9b9b9b', history:'#c07a4a'
+          python:'#60a5fa', sql:'#a3e635', math:'#fbbf24', poetry:'#f472b6',
+          legal:'#c084fc', medical:'#34d399', chinese:'#fb7185', japanese:'#fb923c',
+          russian:'#818cf8', json:'#2dd4bf', chat:'#94a3b8', history:'#d6a77a'
         };
         let rangeMap = null, spin = { x: -0.28, y: 0.7 }, zoom = 1.7, dragging = null;
         const sky = document.getElementById('sky');
@@ -386,23 +391,23 @@ enum WebUI {
           sky.width = w * dpr; sky.height = h * dpr;
           const g = sky.getContext('2d');
           g.scale(dpr, dpr);
-          g.fillStyle = '#08090b'; g.fillRect(0, 0, w, h);
+          g.fillStyle = '#06090d'; g.fillRect(0, 0, w, h);
 
           // A blank canvas under a one-line footnote reads as broken. Say what
           // is missing where the eye already is, and how to produce it.
           if (!rangeMap) {
             g.textAlign = 'center';
-            g.fillStyle = '#8b8783';
+            g.fillStyle = '#7d8b9a';
             g.font = '600 15px ui-monospace, SFMono-Regular, Menlo, monospace';
             g.fillText('No range map for this model.', w / 2, h / 2 - 30);
-            g.fillStyle = '#6f6b67';
+            g.fillStyle = '#5f6c7a';
             g.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
             g.fillText('It is measured rather than shipped. Probe the router to build one:',
                        w / 2, h / 2);
-            g.fillStyle = '#d98b4a';
+            g.fillStyle = '#22d3ee';
             g.fillText('godwit range --model ' + missingDir + ' -o ' + missingDir
                        + '/range.json', w / 2, h / 2 + 26);
-            g.fillStyle = '#6f6b67';
+            g.fillStyle = '#5f6c7a';
             g.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
             g.fillText('A few minutes. Reload when it finishes.', w / 2, h / 2 + 52);
             return;
@@ -415,7 +420,7 @@ enum WebUI {
             const spec = d.p.specialisation;
             const size = (0.7 + spec * 2.6) * d.v.depth * zoom;
             g.globalAlpha = 0.25 + spec * 0.75;
-            g.fillStyle = TOPIC_COLOURS[d.p.topic] || '#777';
+            g.fillStyle = TOPIC_COLOURS[d.p.topic] || '#64748b';
             g.beginPath();
             g.arc(d.v.sx, d.v.sy, Math.max(0.5, size), 0, 6.2832);
             g.fill();
@@ -435,9 +440,9 @@ enum WebUI {
             // A dark plate behind the label: the clusters overlap near the
             // core and bare text on top of points is unreadable.
             const width = g.measureText(topic).width;
-            g.fillStyle = 'rgba(8,9,11,0.82)';
+            g.fillStyle = 'rgba(6,9,13,0.86)';
             g.fillRect(v.sx + 4, v.sy - 14, width + 6, 15);
-            g.fillStyle = TOPIC_COLOURS[topic] || '#aaa';
+            g.fillStyle = TOPIC_COLOURS[topic] || '#94a3b8';
             g.fillText(topic, v.sx + 7, v.sy - 3);
             g.beginPath(); g.arc(v.sx, v.sy, 2.5, 0, 6.2832); g.fill();
           }
@@ -506,7 +511,7 @@ enum WebUI {
                                               && p.specialisation > 0.35).length;
             const el = document.createElement('span');
             el.innerHTML = '<i class="dot" style="background:'
-              + (TOPIC_COLOURS[topic] || '#777') + '"></i>' + topic + ' ' + n;
+              + (TOPIC_COLOURS[topic] || '#64748b') + '"></i>' + topic + ' ' + n;
             legend.appendChild(el);
           }
           const v = data.variance || [];
