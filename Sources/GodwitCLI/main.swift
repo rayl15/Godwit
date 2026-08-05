@@ -832,6 +832,14 @@ case "trace-routing":
         exit(2)
     }
     runRoutingTrace(model: model, layer: layer, tokens: tokens)
+case "check-mxfp4":
+    let mxArgs = Array(arguments.dropFirst())
+    guard mxArgs.count == 1 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit check-mxfp4 <gwt-dir>\n".utf8))
+        exit(2)
+    }
+    runMXFP4Check(model: mxArgs[0])
 case "check-layer":
     let layerArgs = Array(arguments.dropFirst())
     guard layerArgs.count == 2 else {
@@ -1041,4 +1049,80 @@ case nil:
       trace-routing    measure router skew from embeddings (superseded)
       trace-layers     run real layers and test whether routing is predictable
     """)
+}
+
+/// Checks the MXFP4 encoder against OpenAI's own bytes.
+///
+/// GPT-OSS ships MXFP4, so its installed expert weights are already on the
+/// grid. Decoding them and encoding them back must return the identical bytes —
+/// if it does not, the encoder disagrees with the format, and every Qwen3
+/// weight it writes would be quietly wrong in the same way.
+///
+/// This is the check that caught the exponent being floored rather than ceiled.
+func runMXFP4Check(model: String) {
+    let root = URL(fileURLWithPath: model)
+    guard let manifestData = try? Data(contentsOf: root.appendingPathComponent("manifest.json")),
+          let manifest = try? JSONDecoder().decode(GodwitManifest.self, from: manifestData)
+    else {
+        FileHandle.standardError.write(Data("cannot read \(model)/manifest.json\n".utf8))
+        exit(1)
+    }
+    guard let blocksSection = manifest.expertSections["gate_up_blocks"],
+          let scalesSection = manifest.expertSections["gate_up_scales"] else {
+        FileHandle.standardError.write(Data("no MXFP4 expert sections in this install\n".utf8))
+        exit(1)
+    }
+
+    let layerFile = root.appendingPathComponent("experts")
+        .appendingPathComponent(String(format: "layer_%02d.bin", 0))
+    guard let handle = try? FileHandle(forReadingFrom: layerFile) else {
+        FileHandle.standardError.write(Data("cannot open \(layerFile.path)\n".utf8))
+        exit(1)
+    }
+    defer { try? handle.close() }
+
+    var checkedBlocks = 0
+    var byteMismatches = 0
+    var scaleMismatches = 0
+    let expertsToCheck = min(4, manifest.expertCount)
+
+    for expert in 0..<expertsToCheck {
+        let base = expert * manifest.expertStride
+        try? handle.seek(toOffset: UInt64(base + blocksSection.offset))
+        let packed = handle.readData(ofLength: blocksSection.length)
+        try? handle.seek(toOffset: UInt64(base + scalesSection.offset))
+        let scales = handle.readData(ofLength: scalesSection.length)
+        guard packed.count == blocksSection.length,
+              scales.count == scalesSection.length else { continue }
+
+        let blockCount = scales.count
+        let decoded = packed.withUnsafeBytes { p in
+            scales.withUnsafeBytes { s in
+                MXFP4.decode(packed: p, scales: s, blockCount: blockCount)
+            }
+        }
+        let (repacked, rescaled) = MXFP4.encode(decoded)
+
+        checkedBlocks += blockCount
+        for index in 0..<min(repacked.count, packed.count)
+        where repacked[index] != packed[packed.startIndex + index] {
+            byteMismatches += 1
+        }
+        for index in 0..<min(rescaled.count, scales.count)
+        where rescaled[index] != scales[scales.startIndex + index] {
+            scaleMismatches += 1
+        }
+    }
+
+    print("MXFP4 round trip against \(manifest.model)")
+    print("  experts checked   \(expertsToCheck), layer 0, gate_up")
+    print("  blocks            \(checkedBlocks)")
+    print("  packed mismatches \(byteMismatches)")
+    print("  scale mismatches  \(scaleMismatches)")
+    if byteMismatches == 0 && scaleMismatches == 0 {
+        print("  encoder agrees with the shipped format exactly")
+    } else {
+        print("  ENCODER DISAGREES WITH THE FORMAT")
+        exit(1)
+    }
 }
