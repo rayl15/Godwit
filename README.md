@@ -214,7 +214,7 @@ arithmetic, and why the GPU sits idle 82% of the time.
 ## Development
 
 ```bash
-Scripts/test.sh              # 54 tests; works without full Xcode
+Scripts/test.sh              # 58 tests; works without full Xcode
 Scripts/ab_kernel.sh         # A/B two kernels with thermal drift controlled
 python3 Scripts/analysis/verify_install.py model.gwt
 ```

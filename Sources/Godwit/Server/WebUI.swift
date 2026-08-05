@@ -102,25 +102,31 @@ enum WebUI {
         .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 5px;
                   vertical-align: -1px; }
         .empty { color: var(--faint); text-align: center; margin-top: 80px; }
-        .model {
-          display: block; width: 100%; text-align: left; background: #0e1013;
+        /* A grouped <select> rather than a list of buttons: it stays one line
+           whether there are three models or thirty, and it is keyboard
+           navigable for free. */
+        .picker { display: flex; align-items: center; gap: 8px; }
+        .picker > span {
+          font-size: 9px; letter-spacing: 1.2px; text-transform: uppercase;
+          color: var(--faint);
+        }
+        #model {
+          appearance: none; background: #0e1013 no-repeat right 8px center/8px 5px;
+          background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+                            linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+          background-position: right 13px center, right 8px center;
+          background-size: 5px 5px, 5px 5px;
           border: 1px solid var(--line); color: var(--text); font: inherit;
-          padding: 7px 9px; margin-bottom: 5px; cursor: pointer;
+          font-size: 12px; padding: 5px 28px 5px 10px; cursor: pointer; outline: none;
+          max-width: 340px;
         }
-        .model:hover { border-color: var(--accent-dim); }
-        .model.on { border-color: var(--accent); background: #1a1512; }
-        .model.busy { opacity: .5; cursor: wait; }
-        .model b { display: block; font-weight: 600; font-size: 12px; }
-        .model span { color: var(--faint); font-size: 10px; }
-        .model.partial b::after { content: ' · partial'; color: var(--faint); font-weight: 400; }
-        .get {
-          display: block; width: 100%; text-align: left; background: none;
-          border: 1px dashed var(--line); color: var(--dim); font: inherit;
-          padding: 6px 9px; margin-top: 5px; cursor: pointer; font-size: 11px;
+        #model:hover, #model:focus { border-color: var(--accent-dim); }
+        #model:disabled { opacity: .5; cursor: wait; }
+        #install-progress {
+          font-size: 11px; color: var(--dim); display: none; align-items: center; gap: 8px;
         }
-        .get:hover { border-color: var(--accent-dim); color: var(--text); }
-        .bar-sm { height: 3px; background: var(--line); margin-top: 5px; }
-        .bar-sm div { height: 100%; background: var(--accent); width: 0 }
+        #install-progress .bar { width: 90px; height: 3px; background: var(--line); }
+        #install-progress .bar div { height: 100%; background: var(--accent); width: 0 }
         #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
                background: #08090b; border: 1px solid var(--line); }
         #sky:active { cursor: grabbing; }
@@ -137,13 +143,7 @@ enum WebUI {
           <div class="brand"><h1>Godwit</h1><span>MAX RANGE, MIN PAYLOAD</span></div>
 
           <section>
-            <h2>Models</h2>
-            <div id="models"></div>
-            <div id="install-box"></div>
-          </section>
-
-          <section>
-            <h2>Active</h2>
+            <h2>Model</h2>
             <div class="row"><span>\(model)</span></div>
             <div class="row"><span>layers</span><span>\(layers)</span></div>
             <div class="row"><span>experts</span><span>\(experts) · top-\(topK)</span></div>
@@ -188,12 +188,18 @@ enum WebUI {
 
         <main>
           <header>
+            <label class="picker">
+              <span>model</span>
+              <select id="model"></select>
+            </label>
             <div class="tabs">
               <button class="tab on" data-view="chat">Chat</button>
               <button class="tab" data-view="experts">Experts</button>
               <button class="tab" data-view="range">Range</button>
             </div>
             <div class="pill">
+              <span id="install-progress"><span class="bar"><div></div></span>
+                <b id="install-text"></b></span>
               <span>status <b id="status">idle</b></span>
               <span>layer <b id="layer">—</b></span>
             </div>
@@ -489,82 +495,103 @@ enum WebUI {
         window.addEventListener('resize', drawRange);
 
 
-        // ---- Models: list, switch, install ----
-        // Switching releases the old model before loading the new one, which
-        // takes a moment, so the UI locks rather than pretending it is instant.
+        // ---- Models ----
+        // One <select> holds both what is installed and what can be installed,
+        // in separate groups. Choosing an install entry starts the download;
+        // choosing an installed one swaps the loaded model.
         let switching = false;
+        const picker = $('model');
 
         function fmtGiB(b) { return (b / 1073741824).toFixed(1) + ' GiB'; }
 
         async function refreshModels() {
           const d = await (await fetch('/api/models')).json();
-          const box = $('models');
-          box.innerHTML = '';
+          picker.innerHTML = '';
 
-          for (const m of d.installed) {
-            const b = document.createElement('button');
-            b.className = 'model' + (m.name === d.active ? ' on' : '')
-              + (m.complete ? '' : ' partial');
-            b.innerHTML = '<b>' + m.model.split('/').pop() + '</b><span>'
-              + m.layers + ' layers · ' + m.experts + ' experts · ' + fmtGiB(m.bytes)
-              + '</span>';
-            b.onclick = () => selectModel(m.name, b);
-            box.appendChild(b);
+          if (d.installed.length) {
+            const g = document.createElement('optgroup');
+            g.label = 'installed';
+            for (const m of d.installed) {
+              const o = document.createElement('option');
+              o.value = m.name;
+              o.textContent = m.model.split('/').pop()
+                + '  ·  ' + m.layers + 'L × ' + m.experts + 'E  ·  ' + fmtGiB(m.bytes)
+                + (m.complete ? '' : '  · partial');
+              o.selected = m.name === d.active;
+              o.disabled = !m.complete;
+              g.appendChild(o);
+            }
+            picker.appendChild(g);
           }
 
-          const have = new Set(d.installed.map(m => m.model));
-          const get = $('install-box');
-          get.innerHTML = '';
-          for (const a of d.available) {
-            if (have.has(a.id)) continue;
-            const b = document.createElement('button');
-            b.className = 'get';
-            b.textContent = '↓ install ' + a.title + '  (' + fmtGiB(a.bytes) + ')';
-            b.title = a.note;
-            b.onclick = () => installModel(a, b);
-            get.appendChild(b);
+          // Only a complete install counts as having the model — a partial
+          // one should still offer the download that would finish the job.
+          const have = new Set(d.installed.filter(m => m.complete).map(m => m.model));
+          const missing = d.available.filter(a => !have.has(a.id));
+          if (missing.length) {
+            const g = document.createElement('optgroup');
+            g.label = 'install';
+            for (const a of missing) {
+              const o = document.createElement('option');
+              o.value = '+' + a.id;
+              o.textContent = '↓ ' + a.title + '  ·  ' + fmtGiB(a.bytes);
+              o.title = a.note;
+              g.appendChild(o);
+            }
+            picker.appendChild(g);
           }
+
+          if (!d.active) {
+            const o = document.createElement('option');
+            o.textContent = 'none loaded'; o.value = ''; o.selected = true;
+            picker.insertBefore(o, picker.firstChild);
+          }
+          picker.dataset.current = d.active || '';
+          if (d.installing) startWatching(d.installing);
         }
 
-        async function selectModel(name, el) {
-          if (switching || busy || el.classList.contains('on')) return;
-          switching = true;
-          document.querySelectorAll('.model').forEach(x => x.classList.add('busy'));
+        picker.onchange = async () => {
+          const v = picker.value;
+          if (v.startsWith('+')) { installModel(v.slice(1)); return; }
+          if (!v || v === picker.dataset.current) return;
+          if (switching || busy) { picker.value = picker.dataset.current; return; }
+
+          switching = true; picker.disabled = true;
           $('status').textContent = 'loading';
-          const r = await (await fetch('/api/select?name=' + encodeURIComponent(name))).json();
-          switching = false;
-          $('status').textContent = 'idle';
+          const r = await (await fetch('/api/select?name=' + encodeURIComponent(v))).json();
+          switching = false; picker.disabled = false;
           if (r.error) { alert(r.error); await refreshModels(); return; }
-          // The page is built from the loaded model's shape — layer count and
-          // expert count size the grid — so it has to be rebuilt, not patched.
+          // The expert grid is sized by the model's layer and expert counts, so
+          // a switch rebuilds the page rather than patching it.
           location.reload();
-        }
+        };
 
-        function installModel(a, el) {
-          if (switching || busy) return;
-          el.disabled = true;
-          const bar = document.createElement('div');
-          bar.className = 'bar-sm';
-          bar.innerHTML = '<div></div>';
-          el.after(bar);
-          const fill = bar.firstChild;
-
-          const src = new EventSource('/api/install?id=' + encodeURIComponent(a.id));
+        function startWatching(id) {
+          const box = $('install-progress'), text = $('install-text');
+          const fill = box.querySelector('.bar div');
+          box.style.display = 'flex';
+          const size = 1;
+          const src = new EventSource('/api/install?id=' + encodeURIComponent(id));
           src.addEventListener('progress', e => {
             const p = JSON.parse(e.data);
-            fill.style.width = Math.min(100, p.bytes / a.bytes * 100) + '%';
-            el.textContent = '↓ ' + a.title + '  ' + p.stage + ' ' + p.done + '/' + p.total
+            text.textContent = p.stage + ' ' + p.done + '/' + p.total
               + '  ' + fmtGiB(p.bytes);
+            fill.style.width = Math.min(100, p.done / Math.max(p.total, 1) * 100) + '%';
           });
           src.addEventListener('done', () => {
-            src.close(); bar.remove(); refreshModels();
+            src.close(); box.style.display = 'none'; refreshModels();
           });
           src.addEventListener('error', e => {
-            src.close();
-            el.textContent = '× ' + a.title + ' — ' + (JSON.parse(e.data || '{}').message || 'failed');
-            el.disabled = false;
+            src.close(); box.style.display = 'none';
+            alert((JSON.parse(e.data || '{}').message) || 'install failed');
+            refreshModels();
           });
-          src.onerror = () => { src.close(); el.disabled = false; };
+          src.onerror = () => { src.close(); box.style.display = 'none'; };
+        }
+
+        function installModel(id) {
+          picker.value = picker.dataset.current;
+          startWatching(id);
         }
 
         refreshModels();
