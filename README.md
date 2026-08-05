@@ -1,6 +1,16 @@
-<img src="docs/assets/banner.svg" alt="Godwit — max range, min payload" width="640">
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="Godwit — max range, min payload" width="660">
+
+[![license](https://img.shields.io/badge/license-Apache%202.0-d98b4a?style=flat-square&labelColor=2b2622)](LICENSE)
+[![Swift](https://img.shields.io/badge/Swift-6.2%2B-a8632f?style=flat-square&labelColor=2b2622)](https://swift.org)
+[![platform](https://img.shields.io/badge/platform-Apple%20Silicon-8b8783?style=flat-square&labelColor=2b2622)](#requirements)
+[![model](https://img.shields.io/badge/model-GPT--OSS--120B-6b4526?style=flat-square&labelColor=2b2622)](https://huggingface.co/openai/gpt-oss-120b)
+[![dependencies](https://img.shields.io/badge/dependencies-none-6dc46d?style=flat-square&labelColor=2b2622)](Package.swift)
 
 **Run a 120-billion-parameter model on a 16 GB laptop.**
+
+</div>
 
 A bar-tailed godwit flies roughly 13,500 km without landing, without eating, on
 a body weighing about half a pound. Maximum range, minimum payload. That is the
