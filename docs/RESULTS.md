@@ -82,6 +82,7 @@ Recorded because they cost as much to find out as the wins.
 | Attempt | Result |
 | --- | --- |
 | Prefetch by reusing the previous layer's expert IDs | 4.8% hit against 3.1% for chance. This rules out *that* method, not prefetching — see Routing |
+| Serving low-weight experts at lower precision | Costs more accuracy than it saves bytes — see Precision by router rank |
 | Concurrent miss reads | No effect; one and eight threads both reach ~2 GiB/s |
 | Splitting each read into chunks | Slightly *worse* (1.54 → 1.46 tok/s) |
 | More cache slots | Hit rate rises, throughput does not; 24 slots swaps and collapses to 0.12 tok/s |
@@ -157,3 +158,45 @@ Activations are FP16 except the residual stream, which is FP32 — a range
 requirement, not a precision preference. GPT-OSS was trained in bfloat16
 (~3e38); FP16 stops at 65504, and some prompts drive activations past it,
 producing NaN logits and a model that emits one token forever.
+
+## Precision by router rank
+
+`Scripts/analysis/precision_by_rank.py`, on real routing dumps from both
+families.
+
+[HOBBIT](https://arxiv.org/abs/2411.01433) reads cache-miss experts at reduced
+precision, arguing that less critical experts tolerate it, and reports up to
+9.93x. Expert reads are 71.6% of decode here and run at device speed, so
+reading fewer bytes is the only large lever left. It was worth an hour to find
+out whether the argument holds before writing a 2-bit kernel.
+
+It does not. Two measurements kill it, and neither is close.
+
+**The routers are not peaky enough for rank to isolate the damage.**
+
+| | rank 1 | last rank | ratio | mass in the bottom half |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3-30B-A3B, top-8 | 23.5% | 6.9% | 3.4x | 33.4% |
+| GPT-OSS-120B, top-4 | 37.6% | 17.5% | 2.1x | 37.6% |
+
+A third of the routing mass sits in the ranks that would be degraded. HOBBIT's
+argument needs a tail that contributes almost nothing; neither model has one.
+
+**The precision headroom is already spent.** HOBBIT's gain comes from the
+FP16 → INT4 range. These experts are stored at 4.25 bits already, so what
+remains is 4 → 2, which is where the format collapses:
+
+| bits/weight | error on W·x, Qwen3 | GPT-OSS |
+| ---: | ---: | ---: |
+| 4.25 | baseline | baseline |
+| 3.25 | 26.6% | 27.7% |
+| 2.25 | 50.9% | 53.2% |
+
+Combining the two, every policy of the form "serve ranks ≥ R at B bits" costs
+slightly *more* added error than the bytes it saves — a ratio near 1.1:1, on
+both models, at every cut point. Serving Qwen3's ranks 5-8 at 2 bits saves
+15.7% of expert traffic for 17.0% added error in the MoE block.
+
+Not implemented. The paper is sound; the precondition is a model whose router
+concentrates its mass and whose experts are still at 16 bits, and neither holds
+here.

@@ -838,6 +838,15 @@ case "trace-layers":
         exit(2)
     }
     runLayerTrace(model: traceModel, layers: traceLayers, tokens: traceTokens)
+case "dump-routing":
+    let drArgs = Array(arguments.dropFirst())
+    guard drArgs.count >= 2 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit dump-routing <gwt-dir> <prompt> [tokens]\n".utf8))
+        exit(2)
+    }
+    runRoutingDump(model: drArgs[0], prompt: drArgs[1],
+                   tokens: drArgs.count > 2 ? Int(drArgs[2]) ?? 32 : 32)
 case "trace-routing":
     var model: String?
     var layer = 0
@@ -1162,6 +1171,57 @@ func runMXFP4Check(model: String) {
         print("  encoder agrees with the shipped format exactly")
     } else {
         print("  ENCODER DISAGREES WITH THE FORMAT")
+        exit(1)
+    }
+}
+
+/// Dumps every routing decision, with the router's weights, as JSON lines.
+///
+/// The weights are the point. `trace-routing` reports which experts fire, which
+/// answers questions about caching; this answers a different one — how much
+/// each chosen expert actually contributes, and therefore how much it would
+/// cost to serve some of them at lower precision.
+func runRoutingDump(model: String, prompt: String, tokens: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let tokenizer = try reader.loadTokenizer()
+        let runner = ModelRunner(context: context, reader: reader)
+        let weights = try runner.loadWeights()
+        let expertCache = try runner.makeExpertCache(slots: 8)
+
+        var conversation = Conversation(system: "You are a helpful assistant.")
+        conversation.append(Conversation.Message(.user, prompt))
+        let ids = try conversation.encode(with: tokenizer)
+        let cache = try runner.makeCache(maxContext: ids.count + tokens + 16)
+        var sampler = Sampler(settings: .greedy)
+
+        var step = 0
+        func emit(_ layer: Int, _ decisions: [Router.Decision]) {
+            guard let last = decisions.last else { return }
+            let experts = last.experts.map(String.init).joined(separator: ",")
+            let ws = last.weights.map { String(format: "%.6f", $0) }
+                .joined(separator: ",")
+            print("{\"step\":\(step),\"layer\":\(layer),"
+                  + "\"experts\":[\(experts)],\"weights\":[\(ws)]}")
+        }
+
+        var logits = try runner.logits(tokens: ids, positionBase: 0, cache: cache,
+                                       weights: weights, expertCache: expertCache,
+                                       routing: emit)
+        var produced: [Int] = []
+        for _ in 0..<tokens {
+            let next = sampler.pick(from: logits, history: produced)
+            produced.append(next)
+            step += 1
+            logits = try runner.logits(tokens: [next], positionBase: cache.length,
+                                       cache: cache, weights: weights,
+                                       expertCache: expertCache, routing: emit)
+        }
+        FileHandle.standardError.write(Data(
+            "dumped \(step + 1) steps\n".utf8))
+    } catch {
+        FileHandle.standardError.write(Data("routing dump failed: \(error)\n".utf8))
         exit(1)
     }
 }
