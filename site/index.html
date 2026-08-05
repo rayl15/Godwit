@@ -176,12 +176,15 @@ footer a{color:var(--dim)}
   <div class="legend" id="legend"></div>
   <p style="font-size:13px;margin-top:14px" id="meta">loading…</p>
 
-  <div class="note"><p><strong>Read this before believing the counts.</strong>
-  73% of the experts labelled <code>python</code> fired fewer than twenty times
-  across the probes. An expert that fires twice, both times on Python, scores as a
-  pure specialist when it is merely under-sampled. Roughly 150 of the 545 have
-  enough activations to be defensible. More probe samples would fix it and has not
-  been done.</p></div>
+  <div class="note"><p><strong>The counts are of experts that fired often enough
+  to mean it.</strong> An expert selected twice, both times on Python, scores as a
+  pure specialist on two samples — noise in the costume of a finding. A label is
+  credited only above 24 activations, twice the number of topics, below which an
+  expert averages under two observations per topic. Under-sampled experts are
+  still drawn, faintly, because they are real routing; they just are not counted.
+  On this model that bar excludes 1,775 of the 4,475 plotted experts, and takes
+  the <code>python</code> count from 516 to 248. An earlier version of this page
+  reported the larger number.</p></div>
 </div></section>
 
 <section id="numbers"><div class="wrap">
@@ -290,13 +293,16 @@ function draw(){
   g.fillStyle='#06090d'; g.fillRect(0,0,w,h);
   const pts=R.points.map(p=>({p,v:project(p,w,h)})).sort((a,b)=>b.v.z-a.v.z);
   for(const d of pts){
-    g.globalAlpha=.25+d.p.s*.75;
+    /* c===0 marks an expert seen too few times for its topic label to mean
+       anything. Still drawn, because it is real routing, but faintly. */
+    const sure=d.p.c!==0;
+    g.globalAlpha=(.25+d.p.s*.75)*(sure?1:.3);
     g.fillStyle=COLOURS[R.topics[d.p.t]]||'#64748b';
-    g.beginPath(); g.arc(d.v.sx,d.v.sy,Math.max(.5,(0.7+d.p.s*2.6)*d.v.d*zoom),0,6.2832); g.fill();
+    g.beginPath(); g.arc(d.v.sx,d.v.sy,Math.max(.5,(0.7+d.p.s*2.6)*d.v.d*zoom*(sure?1:.55)),0,6.2832); g.fill();
   }
   g.globalAlpha=1; g.font='11px ui-monospace,Menlo,monospace';
   R.topics.forEach((topic,i)=>{
-    const m=R.points.filter(p=>p.t===i&&p.s>.45);
+    const m=R.points.filter(p=>p.t===i&&p.c!==0&&p.s>.45);
     if(m.length<12)return;
     let cx=0,cy=0,cz=0; for(const q of m){cx+=q.x;cy+=q.y;cz+=q.z;}
     const v=project({x:cx/m.length,y:cy/m.length,z:cz/m.length},w,h);
@@ -326,7 +332,7 @@ fetch('range.json').then(r=>r.json()).then(d=>{
   R.spread=s||1;
   const lg=document.getElementById('legend');
   d.topics.forEach((t,i)=>{
-    const c=d.points.filter(p=>p.t===i&&p.s>.35).length;
+    const c=d.points.filter(p=>p.t===i&&p.c!==0&&p.s>.35).length;
     const el=document.createElement('span');
     el.innerHTML='<i class="dot" style="background:'+(COLOURS[t]||'#64748b')+'"></i>'+t+' '+c;
     lg.appendChild(el);

@@ -68,19 +68,25 @@ over topic space.
 
 `godwit range` probes the router with twelve kinds of text — Python, SQL,
 proofs, poetry, contracts, clinical notes, Chinese, Japanese, Russian, JSON,
-casual chat, history — and records which experts fire for each. Position comes
-from the principal components of those affinity vectors, so experts sit together
-because they respond to the same material. Nothing is trained.
+casual chat, history — two samples of each, and records which experts fire for
+them. Position comes from the principal components of those affinity vectors, so
+experts sit together because they respond to the same material. Nothing is
+trained.
 
-The three axes explain 21% / 18% / 13% of the variance, so this is a genuine
+The three axes explain 24% / 19% / 12% of the variance, so this is a genuine
 projection of higher-dimensional structure rather than the whole picture.
 
-> **Caveat worth reading.** The per-topic counts in the legend overstate the
-> case. 73% of the experts labelled `python` fired fewer than 20 times across
-> the probes, and an expert that fires twice — both times on Python — scores as
-> a pure specialist when it is really under-sampled. Roughly 150 of the 545 have
-> enough activations to be defensible. More probe samples is a known, unfinished
-> improvement.
+**Counts are of experts that fired often enough to mean it.** An expert selected
+twice, both times on Python, scores as a pure specialist on two samples — noise
+in the costume of a finding. A label is only credited above 24 activations,
+twice the number of topics, below which an expert averages under two
+observations per topic. Under-sampled experts stay on the plot, drawn faintly,
+because they are real routing; they are simply not counted as evidence of
+anything.
+
+On the 120B that bar is not cosmetic: **40% of the 4,475 plotted experts fall
+below it**, and the `python` count drops from 516 to 248. An earlier version of
+this README reported the larger number.
 
 ## Status
 

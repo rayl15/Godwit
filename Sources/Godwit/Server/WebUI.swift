@@ -102,6 +102,8 @@ enum WebUI {
         .cell.warm { background: var(--trail); }
         .axis { display: flex; justify-content: space-between; color: var(--faint);
                 font-size: 10px; margin-top: 6px; }
+        .cut { color: var(--dim); font-size: 12px; margin-top: 8px;
+               border-left: 2px solid var(--accent-dim); padding-left: 9px; }
         .legend { display: flex; gap: 16px; margin-bottom: 12px;
                   color: var(--dim); font-size: 11px; align-items: center; }
         .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 5px;
@@ -304,7 +306,7 @@ enum WebUI {
 
           const reply = addMessage('assistant', '');
           const body = reply.querySelector('.body');
-          let analysis = null;
+          let think = null;          // <details> holding the reasoning channel
           $('status').textContent = 'prefill';
 
           const source = new EventSource('/api/chat?q=' + encodeURIComponent(text));
@@ -312,6 +314,9 @@ enum WebUI {
           source.addEventListener('token', e => {
             const d = JSON.parse(e.data);
             body.textContent = d.text;
+            // Once the answer begins, the reasoning stops being the interesting
+            // thing on screen and folds itself away.
+            if (d.text && think && think.open) think.open = false;
             $('v-chat').scrollTop = $('v-chat').scrollHeight;
           });
           source.addEventListener('routing', e => {
@@ -330,14 +335,33 @@ enum WebUI {
             if (d.misses !== undefined) $('s-misses').textContent = d.misses + ' misses';
           });
           source.addEventListener('analysis', e => {
-            analysis = JSON.parse(e.data).text;
+            const text = JSON.parse(e.data).text;
+            if (!text) return;
+            if (!think) {
+              think = document.createElement('details');
+              think.innerHTML = '<summary>reasoning</summary><div class="body"></div>';
+              // Open while it is the only output there is, so a long silent
+              // think reads as work rather than as a hang.
+              think.open = !body.textContent;
+              reply.insertBefore(think, body);
+            }
+            think.querySelector('.body').textContent = text;
+            if (think.open) $('v-chat').scrollTop = $('v-chat').scrollHeight;
           });
-          source.addEventListener('done', () => {
-            if (analysis) {
-              const d = document.createElement('details');
-              d.innerHTML = '<summary>reasoning</summary><div class="body"></div>';
-              d.querySelector('.body').textContent = analysis;
-              reply.appendChild(d);
+          source.addEventListener('done', e => {
+            const d = e.data ? JSON.parse(e.data) : {};
+            if (d.answered === false) {
+              // Leave the reasoning open — collapsing it would leave nothing
+              // on screen at all.
+              const note = document.createElement('div');
+              note.className = 'cut';
+              note.textContent = d.truncated
+                ? 'Stopped at the ' + d.limit
+                  + '-token limit while still reasoning, before reaching an answer.'
+                : 'Ended without producing an answer.';
+              reply.appendChild(note);
+            } else if (think) {
+              think.open = false;
             }
             source.close();
             busy = false;
@@ -418,8 +442,11 @@ enum WebUI {
                                    .sort((a, b) => b.v.z - a.v.z);
           for (const d of drawn) {
             const spec = d.p.specialisation;
-            const size = (0.7 + spec * 2.6) * d.v.depth * zoom;
-            g.globalAlpha = 0.25 + spec * 0.75;
+            const sure = d.p.confident !== false;
+            const size = (0.7 + spec * 2.6) * d.v.depth * zoom * (sure ? 1 : 0.55);
+            // Too few activations to read a topic into: still plotted, because
+            // it is real routing, but not dressed up as a finding.
+            g.globalAlpha = (0.25 + spec * 0.75) * (sure ? 1 : 0.3);
             g.fillStyle = TOPIC_COLOURS[d.p.topic] || '#64748b';
             g.beginPath();
             g.arc(d.v.sx, d.v.sy, Math.max(0.5, size), 0, 6.2832);
@@ -431,6 +458,7 @@ enum WebUI {
           g.font = '11px ui-monospace, Menlo, monospace';
           for (const topic of rangeMap.topics) {
             const members = rangeMap.points.filter(p => p.topic === topic
+                                                    && p.confident !== false
                                                     && p.specialisation > 0.45);
             if (members.length < 12) continue;
             let cx = 0, cy = 0, cz = 0;
@@ -507,7 +535,10 @@ enum WebUI {
 
           const legend = document.getElementById('range-legend');
           for (const topic of data.topics) {
+            // Counts are of experts that cleared the activation bar. This is
+            // the number the legend used to overstate.
             const n = data.points.filter(p => p.topic === topic
+                                              && p.confident !== false
                                               && p.specialisation > 0.35).length;
             const el = document.createElement('span');
             el.innerHTML = '<i class="dot" style="background:'

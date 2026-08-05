@@ -42,6 +42,37 @@ public struct ExpertRange {
         /// How concentrated its preference is. 0 is a perfect generalist, 1 a
         /// pure specialist that only ever fires for one topic.
         public let specialisation: Float
+        /// Whether this expert fired often enough for its topic label to mean
+        /// anything. An expert selected twice, both times on Python, scores as
+        /// a pure specialist on two samples — which is noise wearing the
+        /// costume of a finding.
+        public let confident: Bool
+
+        public init(layer: Int, expert: Int, x: Float, y: Float, z: Float,
+                    activations: Int, topic: String, specialisation: Float,
+                    confident: Bool = true) {
+            self.layer = layer; self.expert = expert
+            self.x = x; self.y = y; self.z = z
+            self.activations = activations
+            self.topic = topic
+            self.specialisation = specialisation
+            self.confident = confident
+        }
+
+        // Maps written before confidence existed decode as confident, which is
+        // what they claimed at the time.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            layer = try c.decode(Int.self, forKey: .layer)
+            expert = try c.decode(Int.self, forKey: .expert)
+            x = try c.decode(Float.self, forKey: .x)
+            y = try c.decode(Float.self, forKey: .y)
+            z = try c.decode(Float.self, forKey: .z)
+            activations = try c.decode(Int.self, forKey: .activations)
+            topic = try c.decode(String.self, forKey: .topic)
+            specialisation = try c.decode(Float.self, forKey: .specialisation)
+            confident = try c.decodeIfPresent(Bool.self, forKey: .confident) ?? true
+        }
     }
 
     public struct Map: Codable, Sendable {
@@ -51,6 +82,8 @@ public struct ExpertRange {
         public let expertCount: Int
         /// Share of variance each axis explains, for honesty about the layout.
         public let variance: [Float]
+        /// Activations required before a topic label is treated as meaningful.
+        public let minimumActivations: Int
     }
 
     /// Probes chosen to be linguistically far apart, so a difference in routing
@@ -126,6 +159,94 @@ public struct ExpertRange {
             establishing the principle that sovereigns held authority over
             religious matters within their own territories.
             """),
+
+        // A second, deliberately different sample of each topic. One probe per
+        // topic gave most experts too few activations for their label to mean
+        // anything; it also could not distinguish "responds to Python" from
+        // "responds to this particular snippet".
+        Probe(topic: "python", text: """
+            class LRUCache:
+                def __init__(self, capacity: int) -> None:
+                    self.capacity = capacity
+                    self.store: OrderedDict[int, int] = OrderedDict()
+
+                def get(self, key: int) -> int:
+                    if key not in self.store:
+                        raise KeyError(key)
+                    self.store.move_to_end(key)
+                    return self.store[key]
+            """),
+        Probe(topic: "sql", text: """
+            WITH monthly AS (
+              SELECT date_trunc('month', created_at) AS m, product_id,
+                     COUNT(*) AS units
+              FROM sales GROUP BY 1, 2
+            )
+            SELECT m, product_id, units,
+                   RANK() OVER (PARTITION BY m ORDER BY units DESC) AS rk
+            FROM monthly WHERE units > 0;
+            """),
+        Probe(topic: "math", text: """
+            Suppose G is a finite group of order p^n for a prime p. Then the
+            centre of G is non-trivial. Consider the class equation: the order
+            of G equals the order of the centre plus the sum of the indices of
+            the centralisers of representatives of the non-central conjugacy
+            classes, each of which is divisible by p.
+            """),
+        Probe(topic: "poetry", text: """
+            Because I could not stop for Death, he kindly stopped for me; the
+            carriage held but just ourselves and Immortality. We slowly drove,
+            he knew no haste, and I had put away my labour and my leisure too,
+            for his civility.
+            """),
+        Probe(topic: "legal", text: """
+            This Agreement shall be governed by and construed in accordance with
+            the laws of England and Wales. Any dispute arising out of or in
+            connection with this Agreement, including any question regarding its
+            existence, validity or termination, shall be referred to and finally
+            resolved by arbitration under the LCIA Rules.
+            """),
+        Probe(topic: "medical", text: """
+            A 64-year-old woman with a history of type 2 diabetes mellitus was
+            admitted with a three-day history of polyuria and confusion. Serum
+            glucose was 41 mmol/L with an osmolality of 340 mOsm/kg and no
+            significant ketonaemia, consistent with a hyperosmolar hyperglycaemic
+            state. Cautious fluid resuscitation was initiated.
+            """),
+        Probe(topic: "chinese", text: """
+            中国的四大发明包括造纸术、印刷术、火药和指南针。这些发明
+            对世界历史的发展产生了深远的影响，特别是在文化传播和
+            航海技术方面发挥了重要作用。
+            """),
+        Probe(topic: "japanese", text: """
+            日本の四季ははっきりしていて、それぞれに独特の美しさがあります。
+            春には桜が咲き、夏は祭りが各地で開かれます。秋の紅葉も見事で、
+            冬になると北の地方では深い雪に覆われます。
+            """),
+        Probe(topic: "russian", text: """
+            Классическая русская литература девятнадцатого века оказала
+            огромное влияние на мировую культуру. Произведения Толстого и
+            Достоевского до сих пор переводятся на десятки языков и
+            изучаются в университетах по всему миру.
+            """),
+        Probe(topic: "json", text: """
+            {"status": "ok", "took_ms": 42, "results": [{"sku": "A-1093",
+            "price": {"amount": 1299, "currency": "GBP"}, "stock": 0,
+            "attributes": {"colour": "graphite", "weight_g": 240}},
+            {"sku": "B-7741", "price": {"amount": 899, "currency": "GBP"},
+            "stock": 17, "attributes": {}}], "cursor": null}
+            """),
+        Probe(topic: "chat", text: """
+            omg no way haha. ok so I got there like 20 mins early and the place
+            was already packed?? anyway I saved us a table by the window. text me
+            when you're close and I'll order you the usual :)
+            """),
+        Probe(topic: "history", text: """
+            The Meiji Restoration of 1868 dismantled the Tokugawa shogunate and
+            restored practical imperial rule, initiating a period of rapid
+            industrialisation. Within four decades Japan had built a modern navy,
+            a conscript army and a national railway network.
+            """),
     ]
 
     public let context: MetalContext
@@ -136,10 +257,16 @@ public struct ExpertRange {
         self.reader = reader
     }
 
-    /// Runs every probe and builds the atlas.
+    /// Runs every probe and builds the map.
+    ///
+    /// `minimumActivations` is the bar a topic label has to clear. It defaults
+    /// to twice the number of topics: with twelve topics, an expert seen fewer
+    /// than 24 times has, on average, under two observations per topic, and a
+    /// preference drawn from that is indistinguishable from chance.
     public func build(
         probes: [Probe] = defaultProbes,
         slots: Int = 8,
+        minimumActivations: Int? = nil,
         progress: (String, Int, Int) -> Void = { _, _, _ in }
     ) throws -> Map {
         let tokenizer = try reader.loadTokenizer()
@@ -149,7 +276,19 @@ public struct ExpertRange {
 
         let layerCount = reader.manifest.layerCount
         let expertCount = reader.manifest.expertCount
-        let topics = probes.map(\.topic)
+        // Several probes may share a topic. Counts are grouped by topic, not
+        // by probe, or the same topic would occupy two axes and split its own
+        // experts between them.
+        var topics: [String] = []
+        var topicOf: [Int] = []
+        for probe in probes {
+            if let existing = topics.firstIndex(of: probe.topic) {
+                topicOf.append(existing)
+            } else {
+                topicOf.append(topics.count)
+                topics.append(probe.topic)
+            }
+        }
 
         // counts[layer][expert][topic]
         var counts = [[[Float]]](
@@ -167,20 +306,22 @@ public struct ExpertRange {
                 routing: { layer, decisions in
                     for decision in decisions {
                         for expert in decision.experts {
-                            counts[layer][expert][index] += 1
+                            counts[layer][expert][topicOf[index]] += 1
                         }
                     }
                 })
         }
 
         return Self.assemble(counts: counts, topics: topics,
-                             layerCount: layerCount, expertCount: expertCount)
+                             layerCount: layerCount, expertCount: expertCount,
+                             minimumActivations: minimumActivations ?? topics.count * 2)
     }
 
     // MARK: - Analysis
 
     static func assemble(counts: [[[Float]]], topics: [String],
-                         layerCount: Int, expertCount: Int) -> Map {
+                         layerCount: Int, expertCount: Int,
+                         minimumActivations: Int = 0) -> Map {
         let topicCount = topics.count
 
         // Normalise twice. First by topic, because probes differ in length and
@@ -211,7 +352,8 @@ public struct ExpertRange {
         }
         guard !vectors.isEmpty else {
             return Map(topics: topics, points: [], layerCount: layerCount,
-                         expertCount: expertCount, variance: [])
+                         expertCount: expertCount, variance: [],
+                         minimumActivations: minimumActivations)
         }
 
         let (axes, variance) = principalAxes(vectors, dimensions: 3)
@@ -224,8 +366,14 @@ public struct ExpertRange {
         points.reserveCapacity(vectors.count)
         for (index, vector) in vectors.enumerated() {
             let centred = (0..<topicCount).map { vector[$0] - mean[$0] }
-            let coordinates = (0..<3).map { axis in
-                (0..<topicCount).reduce(Float(0)) { $0 + centred[$1] * axes[axis][$1] }
+            // There are only min(3, topicCount) axes to project onto. With the
+            // twelve default probes that is always three, but a caller with
+            // fewer topics would otherwise index past the end.
+            let coordinates = (0..<3).map { axis -> Float in
+                guard axis < axes.count else { return 0 }
+                return (0..<topicCount).reduce(Float(0)) {
+                    $0 + centred[$1] * axes[axis][$1]
+                }
             }
             let best = vector.indices.max { vector[$0] < vector[$1] } ?? 0
             points.append(Point(
@@ -234,11 +382,13 @@ public struct ExpertRange {
                 x: coordinates[0], y: coordinates[1], z: coordinates[2],
                 activations: Int(identity[index].total),
                 topic: topics[best],
-                specialisation: concentration(vector)))
+                specialisation: concentration(vector),
+                confident: Int(identity[index].total) >= minimumActivations))
         }
 
         return Map(topics: topics, points: points, layerCount: layerCount,
-                     expertCount: expertCount, variance: variance)
+                     expertCount: expertCount, variance: variance,
+                     minimumActivations: minimumActivations)
     }
 
     /// 0 for a uniform vector, 1 for one that puts everything on one topic.

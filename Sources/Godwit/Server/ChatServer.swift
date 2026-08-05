@@ -241,17 +241,28 @@ public final class ChatServer {
                         json: "{\"stage\":\"decode\",\"ttft\":\(ttft)}")
 
             var produced: [Int] = []
+            var lastAnalysis = -1
             let decodeStart = Date()
 
+            var stopped = false
             for step in 0..<maxTokens {
-                guard stream.isOpen else { break }
+                guard stream.isOpen else { stopped = true; break }
                 let next = sampler.pick(from: logits, history: produced)
-                if stops.contains(next) { break }
+                if stops.contains(next) { stopped = true; break }
                 produced.append(next)
 
                 let full = tokenizer.decode(produced)
-                let visible = Conversation.split(full).final
-                stream.send(event: "token", json: "{\"text\":\(quote(visible))}")
+                let parts = Conversation.split(full)
+                stream.send(event: "token", json: "{\"text\":\(quote(parts.final))}")
+                // Reasoning is emitted as it arrives, not held until the end.
+                // GPT-OSS routinely spends hundreds of tokens in the analysis
+                // channel before the first word of the answer, and at these
+                // speeds that is minutes of a blank reply — indistinguishable
+                // from a hang. Only resend when it has actually grown.
+                if let analysis = parts.analysis, analysis.count != lastAnalysis {
+                    lastAnalysis = analysis.count
+                    stream.send(event: "analysis", json: "{\"text\":\(quote(analysis))}")
+                }
 
                 let elapsed = Date().timeIntervalSince(decodeStart)
                 let stats = expertCache.stats
@@ -273,11 +284,13 @@ public final class ChatServer {
                     })
             }
 
-            let parts = Conversation.split(tokenizer.decode(produced))
-            if let analysis = parts.analysis, !analysis.isEmpty {
-                stream.send(event: "analysis", json: "{\"text\":\(quote(analysis))}")
-            }
-            stream.send(event: "done", json: "{}")
+            // A turn can spend its whole budget in the analysis channel and
+            // never reach an answer — GPT-OSS does this on open-ended questions.
+            // Unless the client is told, the reply is just an empty box.
+            let answered = !Conversation.split(tokenizer.decode(produced)).final.isEmpty
+            stream.send(event: "done", json:
+                "{\"truncated\":\(!stopped),\"answered\":\(answered),"
+                + "\"limit\":\(maxTokens)}")
         } catch {
             stream.send(event: "token", json: "{\"text\":\(quote("error: \(error)"))}")
             stream.send(event: "done", json: "{}")
@@ -288,23 +301,4 @@ public final class ChatServer {
     /// unescaped newline in a reply would truncate the frame.
     private func quote(_ text: String) -> String { Self.quoted(text) }
 
-    private func unusedQuote(_ text: String) -> String {
-        var out = "\""
-        for character in text.unicodeScalars {
-            switch character {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            default:
-                if character.value < 0x20 {
-                    out += String(format: "\\u%04x", character.value)
-                } else {
-                    out.unicodeScalars.append(character)
-                }
-            }
-        }
-        return out + "\""
-    }
 }
