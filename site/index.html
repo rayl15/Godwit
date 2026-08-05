@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Godwit — run a 120B model on a 16 GB laptop</title>
-<meta name="description" content="Godwit runs GPT-OSS-120B on an Apple Silicon Mac with 16 GB of memory by streaming mixture-of-experts weights from SSD. Swift and Metal, no dependencies.">
+<meta name="description" content="Godwit runs GPT-OSS-120B, GPT-OSS-20B and Qwen3-30B-A3B on an Apple Silicon Mac with 16 GB of memory by streaming mixture-of-experts weights from SSD. Swift and Metal, no dependencies.">
 <meta property="og:title" content="Godwit — max range, min payload">
 <meta property="og:description" content="A 120-billion-parameter model on a 16 GB laptop. Swift + Metal, no dependencies.">
 <meta property="og:image" content="https://rayl15.github.io/Godwit/assets/range.png">
@@ -98,6 +98,7 @@ footer a{color:var(--dim)}
   <a href="#engine">Engine</a>
   <a href="#views">Views</a>
   <a href="#range">Range</a>
+  <a href="#models">Models</a>
   <a href="#numbers">Numbers</a>
   <a href="#limits">Limits</a>
   <a class="gh" href="https://github.com/rayl15/Godwit">GitHub →</a>
@@ -109,7 +110,8 @@ footer a{color:var(--dim)}
   <p class="lede">GPT-OSS-120B is 59 GiB on disk. Godwit runs it on an Apple Silicon
   Mac with 16 GB of memory by keeping only the shared trunk resident and streaming
   mixture-of-experts weights from SSD as the router asks for them. Swift and Metal,
-  no dependencies.</p>
+  no dependencies. It also runs GPT-OSS-20B and Qwen3-30B-A3B from the same
+  binary, switchable without restarting.</p>
   <div class="cta">
     <a class="btn" href="https://github.com/rayl15/Godwit">Get it on GitHub</a>
     <a class="btn ghost" href="#numbers">See the numbers</a>
@@ -187,6 +189,42 @@ footer a{color:var(--dim)}
   reported the larger number.</p></div>
 </div></section>
 
+<section id="models"><div class="wrap">
+  <h2>Models</h2>
+  <h3>Three, from one binary, switchable at runtime</h3>
+
+  <table>
+    <tr><th>&nbsp;</th><th style="text-align:right">GPT-OSS-120B</th>
+        <th style="text-align:right">GPT-OSS-20B</th>
+        <th style="text-align:right">Qwen3-30B-A3B</th></tr>
+    <tr><td>Layers &times; experts</td><td class="n">36 &times; 128</td>
+        <td class="n">24 &times; 32</td><td class="n">48 &times; 128</td></tr>
+    <tr><td>Active per token</td><td class="n">4</td><td class="n">4</td>
+        <td class="n">8</td></tr>
+    <tr><td>Install</td><td class="n">59.2 GiB</td><td class="n">11.2 GiB</td>
+        <td class="n">16.1 GiB</td></tr>
+    <tr><td>Resident</td><td class="n">5.7 GiB</td><td class="n">4.1 GiB</td>
+        <td class="n">2.5 GiB</td></tr>
+    <tr><td>Decode</td><td class="n">1.4 tok/s</td><td class="n">2.8&ndash;3.2 tok/s</td>
+        <td class="n">2.3 tok/s</td></tr>
+  </table>
+
+  <p>GPT-OSS-20B ran first time with nothing but a spec written down, which
+  proved less than it looked: it shares tensor names, RoPE, activation, sinks
+  and tokeniser with the 120B. Qwen3 shares almost none of that, and it is the
+  reason the claim below changed.</p>
+
+  <div class="note"><p><strong>Two of Qwen3's differences would have run
+  without complaining.</strong> A model with no attention sinks cannot be given
+  a sink of zero &mdash; the sink enters the softmax denominator as
+  <code>exp(sink&nbsp;&minus;&nbsp;max)</code>, so zero adds a whole unit of
+  mass to every row rather than nothing. And MXFP4 has to be written rather than
+  copied, because Qwen3 ships BF16 where GPT-OSS ships weights already on the
+  4-bit grid. <code>godwit check-mxfp4</code> re-encodes OpenAI's own bytes and
+  demands equality across 2,073,600 blocks; it caught a floored exponent and a
+  dropped sign bit.</p></div>
+</div></section>
+
 <section id="numbers"><div class="wrap">
   <h2>Numbers</h2>
   <h3>Measured on a 13″ M4 MacBook Air, 16 GB, base 256 GB SSD</h3>
@@ -230,19 +268,27 @@ footer a{color:var(--dim)}
   under MLX. For most tasks it is good enough, and if that is true for yours you
   should use it instead. Godwit matters where the larger model's quality is worth
   the wait, or where even 20B will not fit.</p>
-  <p>One model family so far. About 78% of the Swift is model-agnostic and reads
-  its dimensions from a spec; the rest is tensor naming, YaRN-only RoPE, and the
-  assumption of MXFP4 experts. Adding a second family should mean writing a loader
-  rather than a runtime — untested until someone does it.</p>
+  <p>This page used to predict that adding a second family would mean writing a
+  loader rather than a runtime. That was half right. Tensor naming did become
+  data, and the spec really does drive dimensions &mdash; but Qwen3 also needed
+  new kernels: QK-norm, plain SwiGLU, an attention path compiled without sinks,
+  and an MXFP4 encoder, because it ships BF16 rather than weights already on the
+  4-bit grid. Seven changes where five were predicted, and two of the seven were
+  not on the list at all. A third family will probably find something too.</p>
 
   <h3 style="margin-top:44px">Install</h3>
-<pre><code><span class="c"># Apple Silicon, macOS 26+, Swift 6.2+, ~60 GB free</span>
+<pre><code><span class="c"># Apple Silicon, macOS 26+, Swift 6.2+
+# Free space: ~60 GB for the 120B, ~17 GB for Qwen3, ~12 GB for the 20B</span>
 git clone https://github.com/rayl15/Godwit.git
 cd Godwit
 swift build -c release
 
 <span class="c"># Stream and repack the checkpoint. ~59 GiB, about 3 hours.</span>
 .build/release/godwit install --output model.gwt
+
+<span class="c"># Or a smaller one — 16 GiB, 105 minutes. The dashboard offers
+# whichever installs it finds beside the one you point it at.</span>
+.build/release/godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 
 .build/release/godwit chat  --model model.gwt   <span class="c"># terminal</span>
 .build/release/godwit serve --model model.gwt   <span class="c"># dashboard</span></code></pre>

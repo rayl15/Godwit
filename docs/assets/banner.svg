@@ -111,5 +111,5 @@
   <text x="220" y="117" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
         font-size="19" font-style="italic" fill="#7d8b9a">max range, min payload</text>
   <text x="220" y="147" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="14" fill="#6b7a8a">GPT-OSS-120B · 117B MoE · MXFP4 · streaming SSD · Apple Silicon</text>
+        font-size="14" fill="#6b7a8a">GPT-OSS · Qwen3 · MoE · MXFP4 · streaming SSD · Apple Silicon</text>
 </svg>
