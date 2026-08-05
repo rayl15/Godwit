@@ -1,0 +1,32 @@
+# Build and test on every push.
+#
+# The GPU suite guards itself with `.enabled(if: MTLCreateSystemDefaultDevice()
+# != nil)`, so on a runner without a Metal device those tests skip rather than
+# fail. Everything else — the cache planner, quantisation, the tokeniser, the
+# layout arithmetic — is pure and runs anywhere.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['site/**', 'docs/**', '**.md']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swift --version
+          sw_vers
+          xcode-select -p
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Test
+        run: Scripts/test.sh
