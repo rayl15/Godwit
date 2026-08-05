@@ -230,11 +230,34 @@ a complete layer including exact expert selection, and the tokeniser against
 
 ## Model support
 
-GPT-OSS-120B today. About 78% of the Swift is model-agnostic and reads its
-dimensions from an `ArchitectureSpec`; the remaining 22% is tensor naming,
-YaRN-only RoPE, and the assumption of MXFP4 experts with a BF16 trunk. Adding a
-second family should mean writing a loader rather than a runtime — though that
-claim is untested until someone does it.
+**GPT-OSS-120B and GPT-OSS-20B**, from one binary. Selecting a size is a flag:
+
+```bash
+godwit install --output 20b.gwt --model-id openai/gpt-oss-20b
+```
+
+| | 120B | 20B |
+| --- | ---: | ---: |
+| Layers | 36 | 24 |
+| Experts per layer | 128 | 32 |
+| Install size | 58.9 GiB | 11.2 GiB |
+| Resident | 5.7 GiB | 4.1 GiB |
+| Decode | 1.4 tok/s | **2.8–3.2 tok/s** |
+
+The 20B was added to test a claim rather than to be useful — MLX runs it far
+faster, and if it suits your task you should use that. What it establishes is
+that `ArchitectureSpec` genuinely drives the runtime: it differs from the 120B
+in exactly two numbers, and it ran first time with no change beyond declaring
+the spec.
+
+That is a real but narrow result. Both are the same family, so tensor naming,
+RoPE variant, activation, attention sinks and tokeniser were never exercised.
+A different family still needs work in five known places: the thirteen
+hardcoded tensor names in the installer, YaRN-only RoPE, the single activation
+implemented in the kernel, the assumption that attention sinks exist, and the
+harmony chat template. Qwen3 is the next real test, and it will break the
+"one expert is one contiguous byte range" assumption because it stores experts
+per-tensor rather than stacked.
 
 ## Prior art
 

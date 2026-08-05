@@ -5,6 +5,25 @@ contradicts [ESTIMATE.md](ESTIMATE.md), this page is the one that is true —
 that document is the pre-build projection, kept for the reasoning rather than
 the figures.
 
+## Two models, one binary
+
+| | GPT-OSS-120B | GPT-OSS-20B |
+| --- | ---: | ---: |
+| Layers × experts | 36 × 128 | 24 × 32 |
+| Install | 58.9 GiB | 11.2 GiB |
+| Resident (8 slots) | 5.7 GiB | 4.1 GiB |
+| Decode | 1.4-1.5 tok/s | 2.8-3.2 tok/s |
+| Prefill | ~2.2 tok/s | ~4 tok/s |
+
+The 20B ran first time with no code change beyond declaring its spec, which
+demonstrates that dimensions really are read from `ArchitectureSpec` rather
+than assumed. It is a narrow demonstration: same family, so tensor naming,
+RoPE, activation, sinks and tokeniser were untested.
+
+The speed difference is entirely reads. Both models fetch four experts per
+layer at 12.61 MiB each, so a 20B token costs 24 layers of reads against the
+120B's 36, and a smaller pool means a warmer cache.
+
 ## Machine
 
 13" MacBook Air, Apple M4, 16 GB unified memory, **base 256 GB SSD**, macOS 26.
