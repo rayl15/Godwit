@@ -81,7 +81,7 @@ Recorded because they cost as much to find out as the wins.
 
 | Attempt | Result |
 | --- | --- |
-| Cross-layer prefetch | 4.8% hit against 3.1% for chance — routing is not predictable |
+| Prefetch by reusing the previous layer's expert IDs | 4.8% hit against 3.1% for chance. This rules out *that* method, not prefetching — see Routing |
 | Concurrent miss reads | No effect; one and eight threads both reach ~2 GiB/s |
 | Splitting each read into chunks | Slightly *worse* (1.54 → 1.46 tok/s) |
 | More cache slots | Hit rate rises, throughput does not; 24 slots swaps and collapses to 0.12 tok/s |
@@ -108,7 +108,24 @@ Measured on real layers with `godwit trace-layers`, 36 layers × 64 tokens:
 - Adjacent *layers* share **4.8%** of their experts (chance: 3.1%)
 - Adjacent *tokens* at one layer share **54%**
 
-That asymmetry is the whole story: caching works, prefetching does not.
+That asymmetry is why caching along the token axis works.
+
+**A correction.** This section used to end "caching works, prefetching does
+not", which the 4.8% does not support. Expert-set overlap between adjacent
+layers answers one question: can you predict layer *n+1* by reusing layer *n*'s
+chosen expert IDs? No. It says nothing about running layer *n+1*'s router early
+on layer *n*'s hidden state, which computes the gate rather than assuming the
+choices repeat. That is what colibrì's lookahead thread does, and what
+[Pre-Attention Expert Prediction](https://arxiv.org/abs/2511.10676) does with a
+learned linear probe, reporting 94.69% accuracy on Qwen3-30B.
+
+Neither is implemented here, and neither has been ruled out. The measurement
+above is correct; the conclusion drawn from it was not.
+
+Worth noting what the ceiling would be on this machine. Lookahead hides read
+latency behind compute, and the GPU is busy 17.6% of decode — so overlapping
+read(n+1) with compute(n) recovers at most that, roughly 1.2x. The larger lever
+is reducing bytes read, which is 71.6% of decode and untouched by any prefetch.
 
 ## Quantisation
 

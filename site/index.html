@@ -160,8 +160,11 @@ footer a{color:var(--dim)}
     <img src="assets/experts.png" alt="Live expert routing grid">
     <figcaption>Every one of the model's 4,608 experts — 36 layers across, 128 down —
     lighting up as the router selects them. Exactly 144 cells fire for any single
-    token. The near-uniform speckle is a finding, not noise: routing is not
-    predictable across layers, which is why prefetching does not work.</figcaption>
+    token. The near-uniform speckle is a finding, not noise: adjacent layers share
+    only 4.8% of their experts, against 3.1% for chance. This page used to add
+    &ldquo;which is why prefetching does not work&rdquo; &mdash; it does not
+    follow. Reusing the previous layer&rsquo;s choices fails; running the next
+    layer&rsquo;s router early does not, and has not been tested here.</figcaption>
   </figure>
 </div></section>
 
@@ -249,7 +252,7 @@ footer a{color:var(--dim)}
   <p>Recorded because they cost as much to establish as the wins.</p>
   <table>
     <tr><th>Attempt</th><th>Result</th></tr>
-    <tr><td>Cross-layer prefetch</td><td class="no">4.8% hit vs 3.1% chance</td></tr>
+    <tr><td>Prefetch by reusing previous layer's expert IDs</td><td class="no">4.8% hit vs 3.1% chance</td></tr>
     <tr><td>Concurrent miss reads</td><td class="no">no effect</td></tr>
     <tr><td>Splitting reads into chunks</td><td class="no">slightly worse</td></tr>
     <tr><td>More cache slots (24)</td><td class="no">swaps; 0.12 tok/s</td></tr>

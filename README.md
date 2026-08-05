@@ -56,10 +56,19 @@ token.
 
 ![Experts](docs/assets/experts.png)
 
-The near-uniform speckle is a finding, not noise. If routing were predictable
-across layers, the next layer's experts could be fetched while the current one
-computes. It is not: layer *n* predicts layer *n+1* only 4.8% of the time,
-against 3.1% for a random guess.
+The near-uniform speckle is a finding, not noise: adjacent layers share only
+**4.8%** of their experts, against 3.1% for a random guess. Consecutive tokens
+at one layer share 54%, which is why caching along the token axis works.
+
+**That measurement is narrower than it was once made to carry.** It says an
+expert chosen at layer *n* is no guide to layer *n+1* — so you cannot prefetch
+by reusing the previous layer's choices. This README previously concluded from
+it that prefetching does not work at all. That does not follow, and it is
+wrong: the usable method is to run layer *n+1*'s **router** early on layer *n*'s
+hidden state, which predicts the choices rather than assuming they repeat.
+[colibrì](https://github.com/JustVugg/colibri) does exactly this and reports it
+working. Godwit does not implement it, and the reason recorded here for not
+doing so was a measurement that answered a different question.
 
 ### Range map
 
