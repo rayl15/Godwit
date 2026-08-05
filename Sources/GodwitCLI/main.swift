@@ -959,6 +959,17 @@ case "serve":
         case "--max", "-n": serveMax = serveFlags.next().flatMap(Int.init) ?? 1024
         case "--temperature", "-t":
             serveSettings.temperature = serveFlags.next().flatMap(Float.init) ?? 0.7
+        // The README has claimed serve took these for a while; it did not.
+        // Qwen3's recommended settings are top-p 0.95 and top-k 20, so the
+        // dashboard could not be run the way its own model asks to be.
+        case "--top-k": serveSettings.topK = serveFlags.next().flatMap(Int.init) ?? 40
+        case "--top-p": serveSettings.topP = serveFlags.next().flatMap(Float.init) ?? 0.95
+        case "--repetition-penalty":
+            serveSettings.repetitionPenalty = serveFlags.next().flatMap(Float.init) ?? 1.1
+        case "--seed":
+            if let value = serveFlags.next().flatMap(UInt64.init) {
+                serveSettings.seed = value
+            }
         case "--greedy": serveSettings = .greedy
         default:
             FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
@@ -967,7 +978,8 @@ case "serve":
     }
     guard let serveModel else {
         FileHandle.standardError.write(Data(
-            "usage: godwit serve --model <dir> [--port 8080] [--temperature N]\n".utf8))
+            ("usage: godwit serve --model <dir> [--port 8080] [--temperature N] "
+             + "[--top-k N] [--top-p N] [--repetition-penalty N] [--seed N] [--greedy]\n").utf8))
         exit(2)
     }
     runServe(model: serveModel, port: servePort, slots: serveSlots,
