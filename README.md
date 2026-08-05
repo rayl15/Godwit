@@ -1,4 +1,4 @@
-# Godwit
+<img src="docs/assets/banner.svg" alt="Godwit — max range, min payload" width="640">
 
 **Run a 120-billion-parameter model on a 16 GB laptop.**
 
