@@ -78,7 +78,8 @@ public struct TransformerLayer {
     /// kernels as FP16, since RMSNorm bounds them.
     public func forward(
         hidden: [Float], tokenCount: Int, positionBase: Int,
-        weights: Weights, cache: KVCache, expertCache: ExpertCache? = nil
+        weights: Weights, cache: KVCache, expertCache: ExpertCache? = nil,
+        routerInput: (([Float]) -> Void)? = nil
     ) throws -> (hidden: [Float], trace: Trace) {
         let width = spec.hiddenSize
         var stream = hidden
@@ -101,6 +102,11 @@ public struct TransformerLayer {
         normed = try timed("cpu:norm") {
             try normalise(stream, tokenCount: tokenCount, weight: weights.postNorm)
         }
+
+        // `if let` rather than optional chaining: `f?(g())` short-circuits the
+        // argument too, which is how a profiling call once silently removed the
+        // work it was meant to measure.
+        if let routerInput { routerInput(normed.map(Float.init)) }
 
         // Route every token first, then do the expert work grouped by expert.
         //

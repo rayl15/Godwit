@@ -200,3 +200,54 @@ both models, at every cut point. Serving Qwen3's ranks 5-8 at 2 bits saves
 Not implemented. The paper is sound; the precondition is a model whose router
 concentrates its mass and whose experts are still at 16 bits, and neither holds
 here.
+
+## Lookahead routing
+
+`Scripts/analysis/lookahead_accuracy.py`, on real decode traces from both
+families.
+
+The question the 4.8% figure above does *not* answer: if you run a layer's own
+router on the residual **entering** that layer — before its attention block has
+run — how much of the real selection do you recover?
+
+| | accuracy | chance | lift | top-1 recovered |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3-30B-A3B, top-8 | **90.6%** | 6.2% | 14.5x | 99.6% |
+| GPT-OSS-120B, top-4 | **87.1%** | 3.1% | 27.9x | 99.1% |
+
+Accuracy is lowest in the first few layers — 80.3% and 75.5% — and settles above
+90% for the rest of the depth, which is consistent with early layers changing
+the residual most.
+
+The top-ranked expert, which carries the largest routing weight, is recovered
+**over 99%** of the time in both models. So the errors are concentrated in the
+tail, where a miss costs the least.
+
+This is the measurement that should have been made before writing "prefetching
+does not work". Adjacent layers sharing 4.8% of their experts is true and
+irrelevant: a lookahead scheme does not reuse the previous layer's choices, it
+computes the gate early. colibrì reports 71.6% one layer ahead and ships it;
+these numbers are higher because the prediction here is made within the layer,
+skipping only attention rather than a whole block.
+
+**What it would buy is smaller than the accuracy suggests.** Prefetching hides
+read latency behind compute, and the GPU is busy 17.6% of decode — so the
+ceiling on this machine is roughly 1.2x, not the multiples reported by projects
+running on hardware where compute is the larger share. A wrong prediction also
+costs a wasted read, at 0.8 of 8 experts for Qwen3, unless the speculative
+fetch is cancelled once the true routing is known.
+
+Not implemented. Unlike the two entries under *what did not work*, this one is
+worth building.
+
+### A note on how this was measured
+
+The first version of this script read the router as int8 and reported 6.3%
+against 6.2% chance — a perfect null, and exactly the answer the repo already
+believed. The router is stored BF16, because it decides which experts fire and
+is small enough to keep at full width.
+
+The script now reproduces the engine's own selection from the true router input
+before it measures anything, and aborts below 99%. That check caught the int8
+error, and then caught a second one: GPT-OSS's router carries a bias that Qwen3's
+does not, worth 10 points of agreement on its own.

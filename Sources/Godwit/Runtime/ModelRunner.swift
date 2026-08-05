@@ -88,15 +88,25 @@ public struct ModelRunner {
         tokens: [Int], positionBase: Int = 0, cache: KVCache, weights: Weights,
         expertCache: ExpertCache? = nil,
         progress: (Int, Int) -> Void = { _, _ in },
-        routing: ((Int, [Router.Decision]) -> Void)? = nil
+        routing: ((Int, [Router.Decision]) -> Void)? = nil,
+        /// Fires with the residual stream *entering* each layer.
+        ///
+        /// This is what a lookahead scheme has available one layer early: the
+        /// residual after layer n-1, before layer n's attention has run.
+        hidden: ((Int, [Float]) -> Void)? = nil,
+        /// Fires with the exact vector the router consumes, for validating
+        /// offline reimplementations of the routing decision.
+        routerInput: ((Int, [Float]) -> Void)? = nil
     ) throws -> [Float] {
         precondition(!tokens.isEmpty, "need at least one token")
         var stream = try embed(tokens: tokens, weights: weights)
 
         for (index, layer) in layers.enumerated() {
+            hidden?(index, stream)
             let (next, trace) = try layer.forward(
                 hidden: stream, tokenCount: tokens.count, positionBase: positionBase,
-                weights: weights.layers[index], cache: cache, expertCache: expertCache)
+                weights: weights.layers[index], cache: cache, expertCache: expertCache,
+                routerInput: routerInput.map { fire in { fire(index, $0) } })
             stream = next
             routing?(index, trace.routing)
             progress(index + 1, layers.count)

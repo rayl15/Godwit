@@ -838,6 +838,15 @@ case "trace-layers":
         exit(2)
     }
     runLayerTrace(model: traceModel, layers: traceLayers, tokens: traceTokens)
+case "dump-hidden":
+    let dhArgs = Array(arguments.dropFirst())
+    guard dhArgs.count >= 3 else {
+        FileHandle.standardError.write(Data(
+            "usage: godwit dump-hidden <gwt-dir> <prompt> <out.bin> [tokens]\n".utf8))
+        exit(2)
+    }
+    runHiddenDump(model: dhArgs[0], prompt: dhArgs[1], output: dhArgs[2],
+                  tokens: dhArgs.count > 3 ? Int(dhArgs[3]) ?? 32 : 32)
 case "dump-routing":
     let drArgs = Array(arguments.dropFirst())
     guard drArgs.count >= 2 else {
@@ -1222,6 +1231,67 @@ func runRoutingDump(model: String, prompt: String, tokens: Int) {
             "dumped \(step + 1) steps\n".utf8))
     } catch {
         FileHandle.standardError.write(Data("routing dump failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+/// Dumps the residual stream entering every layer, for the last token of each
+/// decode step, as raw float32.
+///
+/// Exists to test lookahead prefetching without building it: this vector is
+/// what a lookahead scheme would have available one layer early, so applying
+/// layer n's router to it offline measures the prediction directly.
+func runHiddenDump(model: String, prompt: String, output: String, tokens: Int) {
+    do {
+        let context = try MetalContext()
+        let reader = try ModelReader(directory: URL(fileURLWithPath: model))
+        let tokenizer = try reader.loadTokenizer()
+        let runner = ModelRunner(context: context, reader: reader)
+        let weights = try runner.loadWeights()
+        let expertCache = try runner.makeExpertCache(slots: 8)
+        let width = reader.manifest.spec.hiddenSize
+
+        var conversation = Conversation(system: "You are a helpful assistant.")
+        conversation.append(Conversation.Message(.user, prompt))
+        let ids = try conversation.encode(with: tokenizer)
+        let cache = try runner.makeCache(maxContext: ids.count + tokens + 16)
+        var sampler = Sampler(settings: .greedy)
+
+        var out = Data()
+        var tokenCount = ids.count
+        func capture(_ layer: Int, _ stream: [Float]) {
+            // Last row only: that is the token being generated.
+            let start = (tokenCount - 1) * width
+            var row = Array(stream[start..<(start + width)])
+            out.append(Data(bytes: &row, count: width * 4))
+        }
+
+        var routerIn = Data()
+        func captureRouter(_ layer: Int, _ v: [Float]) {
+            let start = (tokenCount - 1) * width
+            var row = Array(v[start..<(start + width)])
+            routerIn.append(Data(bytes: &row, count: width * 4))
+        }
+
+        var logits = try runner.logits(tokens: ids, positionBase: 0, cache: cache,
+                                       weights: weights, expertCache: expertCache,
+                                       hidden: capture, routerInput: captureRouter)
+        var produced: [Int] = []
+        for _ in 0..<tokens {
+            let next = sampler.pick(from: logits, history: produced)
+            produced.append(next)
+            tokenCount = 1
+            logits = try runner.logits(tokens: [next], positionBase: cache.length,
+                                       cache: cache, weights: weights,
+                                       expertCache: expertCache, hidden: capture,
+                                       routerInput: captureRouter)
+        }
+        try out.write(to: URL(fileURLWithPath: output))
+        try routerIn.write(to: URL(fileURLWithPath: output + ".router"))
+        FileHandle.standardError.write(Data(
+            "wrote \(out.count / (width * 4)) vectors of \(width)\n".utf8))
+    } catch {
+        FileHandle.standardError.write(Data("hidden dump failed: \(error)\n".utf8))
         exit(1)
     }
 }
