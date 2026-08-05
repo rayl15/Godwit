@@ -40,6 +40,9 @@ public struct ModelRegistry {
         Available(id: "openai/gpt-oss-120b", title: "GPT-OSS-120B",
                   layers: 36, experts: 128, bytes: 63_278_346_240,
                   note: "The reason this project exists — it fits nowhere else."),
+        Available(id: "Qwen/Qwen3-30B-A3B", title: "Qwen3-30B-A3B",
+                  layers: 48, experts: 128, bytes: 16_900_000_000,
+                  note: "A second family. Quantised here rather than shipped quantised."),
     ]
 
     public let root: URL
@@ -88,6 +91,7 @@ public struct ModelRegistry {
         let id = repository.lowercased()
         if id.contains("gpt-oss-20b") { return .gptOSS20B }
         if id.contains("gpt-oss-120b") { return .gptOSS120B }
+        if id.contains("qwen3-30b-a3b") { return .qwen3MoE30B }
         return nil
     }
 }

@@ -47,7 +47,8 @@ public struct ExpertLayout: Sendable, Equatable {
     /// Page-aligned bytes per expert.
     public let stride: Int
 
-    public init(hiddenSize: Int, intermediateSize: Int, expertCount: Int) {
+    public init(hiddenSize: Int, intermediateSize: Int, expertCount: Int,
+                expertBias: Bool = true) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.expertCount = expertCount
@@ -61,8 +62,11 @@ public struct ExpertLayout: Sendable, Equatable {
             .gateUpScales: gateUpRows * blocksPerRow,
             .downBlocks: downRows * (intermediateSize / MXFP4.blockSize) * MXFP4.packedBytesPerBlock,
             .downScales: downRows * (intermediateSize / MXFP4.blockSize),
-            .gateUpBias: gateUpRows * 2,        // BF16
-            .downBias: downRows * 2,            // BF16
+            // Qwen3 has no expert biases. Zero-length rather than absent keeps
+            // the section list the same shape for every family, so the reader
+            // needs no special case — it just never reads them.
+            .gateUpBias: expertBias ? gateUpRows * 2 : 0,        // BF16
+            .downBias: expertBias ? downRows * 2 : 0,            // BF16
         ]
 
         // Each section starts page-aligned so a read of one never shares a page
@@ -70,6 +74,7 @@ public struct ExpertLayout: Sendable, Equatable {
         var offsets: [Section: Int] = [:]
         var cursor = 0
         for section in Section.allCases {
+            guard sizes[section]! > 0 else { offsets[section] = cursor; continue }
             cursor = Self.alignUp(cursor)
             offsets[section] = cursor
             cursor += sizes[section]!

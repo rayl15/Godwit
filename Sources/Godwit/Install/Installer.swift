@@ -53,7 +53,7 @@ public struct Installer {
     // MARK: - Checkpoint index
 
     /// Tensor name -> shard, plus lazily fetched per-shard headers.
-    private actor Catalog {
+    fileprivate actor Catalog {
         let base: URL
         let streamer: RangeStreamer
         let weightMap: [String: String]
@@ -94,7 +94,8 @@ public struct Installer {
         let layerCount = min(options.layerLimit ?? spec.layerCount, spec.layerCount)
         let expertLayout = ExpertLayout(hiddenSize: spec.hiddenSize,
                                         intermediateSize: spec.intermediateSize,
-                                        expertCount: spec.layers[0].routedExpertCount)
+                                        expertCount: spec.layers[0].routedExpertCount,
+                                        expertBias: spec.expertBias)
 
         try FileManager.default.createDirectory(
             at: directory.appendingPathComponent("experts"),
@@ -110,7 +111,17 @@ public struct Installer {
                 .path
             let writer = try PositionalWriter(path: path, size: expertLayout.layerFileSize)
 
-            for section in ExpertLayout.Section.allCases {
+            if spec.naming.expertLayout == .perExpertTensors {
+                bytesWritten += try await installPerExpertLayer(
+                    layer: layer, writer: writer, layout: expertLayout, catalog: catalog)
+                try writer.sync()
+                progress(Progress(stage: "experts", completed: layer + 1,
+                                  total: layerCount, bytesWritten: bytesWritten))
+                continue
+            }
+
+            for section in ExpertLayout.Section.allCases
+            where expertLayout.size(of: section) > 0 {
                 let tensor = section.tensorName(layer: layer)
                 let (url, header) = try await catalog.header(forTensor: tensor)
                 let entry = try header.entry(tensor)
@@ -193,8 +204,11 @@ public struct Installer {
         var quantized: [(name: String, tensor: String, rows: Int, cols: Int)] = []
         var copied: [(name: String, tensor: String)] = []
 
-        for (name, tensor) in [("embed", "model.embed_tokens.weight"),
-                               ("head", "lm_head.weight")] {
+        let naming = spec.naming
+        var headTensors: [(String, String)] = [("embed", naming.embedding)]
+        if let head = naming.outputHead { headTensors.append(("head", head)) }
+
+        for (name, tensor) in headTensors {
             let (_, header) = try await catalog.header(forTensor: tensor)
             let shape = try header.entry(tensor).shape
             plan.append(name: name,
@@ -204,8 +218,11 @@ public struct Installer {
         }
 
         for layer in 0..<layerCount {
-            for projection in ["q_proj", "k_proj", "v_proj", "o_proj"] {
-                let tensor = "model.layers.\(layer).self_attn.\(projection).weight"
+            for (projection, template) in [
+                ("q_proj", naming.queryProjection), ("k_proj", naming.keyProjection),
+                ("v_proj", naming.valueProjection), ("o_proj", naming.outputProjection),
+            ] {
+                let tensor = naming.resolve(template, layer: layer)
                 let (_, header) = try await catalog.header(forTensor: tensor)
                 let shape = try header.entry(tensor).shape
                 let name = "layer\(layer).\(projection)"
@@ -217,20 +234,26 @@ public struct Installer {
             // Small, and each feeds something precision-sensitive: norms scale
             // everything downstream, the router picks experts, and sinks sit
             // inside a softmax. Copied as BF16 rather than quantised.
-            for (suffix, tensor) in [
-                // attention_bias is true for GPT-OSS: q/k/v/o all carry biases,
-                // which most contemporary models omit. Forgetting them produces
-                // an attention block that runs and is simply wrong.
-                ("q_bias", "model.layers.\(layer).self_attn.q_proj.bias"),
-                ("k_bias", "model.layers.\(layer).self_attn.k_proj.bias"),
-                ("v_bias", "model.layers.\(layer).self_attn.v_proj.bias"),
-                ("o_bias", "model.layers.\(layer).self_attn.o_proj.bias"),
-                ("input_norm", "model.layers.\(layer).input_layernorm.weight"),
-                ("post_norm", "model.layers.\(layer).post_attention_layernorm.weight"),
-                ("router_w", "model.layers.\(layer).mlp.router.weight"),
-                ("router_b", "model.layers.\(layer).mlp.router.bias"),
-                ("sinks", "model.layers.\(layer).self_attn.sinks"),
+            // Small, and each feeds something precision-sensitive. Which of
+            // these exist is a property of the family: GPT-OSS has biases and
+            // sinks and no QK-norm, Qwen3 the exact reverse. A nil name means
+            // the tensor is not in the checkpoint, so asking for it would 404.
+            var small: [(String, String)] = [
+                ("input_norm", naming.resolve(naming.inputNorm, layer: layer)),
+                ("post_norm", naming.resolve(naming.postAttentionNorm, layer: layer)),
+                ("router_w", naming.resolve(naming.router, layer: layer)),
+            ]
+            for (suffix, template) in [
+                ("q_bias", naming.queryBias), ("k_bias", naming.keyBias),
+                ("v_bias", naming.valueBias), ("o_bias", naming.outputBias),
+                ("router_b", naming.routerBias), ("sinks", naming.attentionSinks),
+                ("q_norm", naming.queryNorm), ("k_norm", naming.keyNorm),
             ] {
+                guard let template else { continue }
+                small.append((suffix, naming.resolve(template, layer: layer)))
+            }
+
+            for (suffix, tensor) in small {
                 let (_, header) = try await catalog.header(forTensor: tensor)
                 let entry = try header.entry(tensor)
                 plan.append(name: "layer\(layer).\(suffix)", length: entry.byteCount,
@@ -238,11 +261,11 @@ public struct Installer {
                 copied.append(("layer\(layer).\(suffix)", tensor))
             }
         }
-        let (_, normHeader) = try await catalog.header(forTensor: "model.norm.weight")
-        let normEntry = try normHeader.entry("model.norm.weight")
+        let (_, normHeader) = try await catalog.header(forTensor: naming.finalNorm)
+        let normEntry = try normHeader.entry(naming.finalNorm)
         plan.append(name: "final_norm", length: normEntry.byteCount,
                     dtype: "bf16", shape: normEntry.shape)
-        copied.append(("final_norm", "model.norm.weight"))
+        copied.append(("final_norm", naming.finalNorm))
 
         let writer = try PositionalWriter(
             path: directory.appendingPathComponent("trunk.bin").path, size: plan.totalSize)
@@ -327,4 +350,162 @@ public struct Installer {
             row += take
         }
     }
+}
+
+// MARK: - Per-expert checkpoints
+
+extension Installer {
+    /// Experts fetched concurrently. One expert is three round trips of a
+    /// couple of megabytes, and at 18,432 tensors the run is dominated by
+    /// latency rather than bandwidth: serially this measured 9.9 minutes per
+    /// layer, which is eight hours for the model. Eight at a time holds peak
+    /// memory near 80 MB, still honouring the rule that nothing here scales
+    /// with checkpoint size.
+    static let expertFetchWidth = 8
+
+    /// Installs one layer's experts from a checkpoint that stores them
+    /// separately, three tensors per expert.
+    ///
+    /// GPT-OSS hands over a layer's experts as two stacked tensors already in
+    /// MXFP4, so the installer slices and copies. Qwen3 hands over
+    /// `mlp.experts.<n>.{gate,up,down}_proj` in BF16, so contiguity has to be
+    /// built rather than inherited and the bytes quantised on the way past.
+    fileprivate func installPerExpertLayer(
+        layer: Int,
+        writer: PositionalWriter,
+        layout: ExpertLayout,
+        catalog: Catalog
+    ) async throws -> Int {
+        let naming = spec.naming
+        let hidden = spec.hiddenSize
+        let inner = spec.intermediateSize
+        let streamer = self.streamer
+        let counter = Counter()
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for expert in 0..<layout.expertCount {
+                if inFlight >= Self.expertFetchWidth {
+                    try await group.next()
+                    inFlight -= 1
+                }
+                inFlight += 1
+                group.addTask {
+                    let read = try await installOneExpert(
+                        layer: layer, expert: expert, naming: naming,
+                        hidden: hidden, inner: inner, layout: layout,
+                        writer: writer, catalog: catalog, streamer: streamer)
+                    counter.add(read)
+                }
+            }
+            try await group.waitForAll()
+        }
+        return counter.value
+    }
+}
+
+/// Fetches, interleaves, quantises and writes one expert.
+///
+/// Free rather than a method so a task group can run several without sending
+/// the whole `Installer`.
+private func installOneExpert(
+    layer: Int, expert: Int, naming: TensorNaming,
+    hidden: Int, inner: Int, layout: ExpertLayout,
+    writer: PositionalWriter, catalog: Installer.Catalog, streamer: RangeStreamer
+) async throws -> Int {
+    async let gateData = fetchNamedTensor(
+        naming.resolve(naming.expertGate, layer: layer, expert: expert), catalog, streamer)
+    async let upData = fetchNamedTensor(
+        naming.resolve(naming.expertUp, layer: layer, expert: expert), catalog, streamer)
+    async let downData = fetchNamedTensor(
+        naming.resolve(naming.expertDown, layer: layer, expert: expert), catalog, streamer)
+
+    let (gateRaw, gateShape) = try await gateData
+    let (upRaw, upShape) = try await upData
+    let (downRaw, downShape) = try await downData
+
+    guard gateShape == [inner, hidden], upShape == [inner, hidden] else {
+        throw InstallError.unexpectedShape(
+            tensor: naming.resolve(naming.expertGate, layer: layer, expert: expert),
+            shape: gateShape)
+    }
+    guard downShape == [hidden, inner] else {
+        throw InstallError.unexpectedShape(
+            tensor: naming.resolve(naming.expertDown, layer: layer, expert: expert),
+            shape: downShape)
+    }
+
+    let gate = gateRaw.withUnsafeBytes { BFloat16.decode($0, count: inner * hidden) }
+    let up = upRaw.withUnsafeBytes { BFloat16.decode($0, count: inner * hidden) }
+    let down = downRaw.withUnsafeBytes { BFloat16.decode($0, count: hidden * inner) }
+
+    // The kernel reads gate and up interleaved row-wise — gate 0, up 0, gate 1,
+    // up 1 — because that is how GPT-OSS ships them and how the expert kernel
+    // indexes. Qwen3 keeps them apart, so interleave here rather than teach the
+    // kernel a second order. Getting this backwards is the failure that runs
+    // fine and produces nonsense: measured, the swap costs 21 dB.
+    var gateUp = [Float](repeating: 0, count: 2 * inner * hidden)
+    for row in 0..<inner {
+        let source = row * hidden
+        gateUp.replaceSubrange((2 * row) * hidden..<(2 * row + 1) * hidden,
+                               with: gate[source..<source + hidden])
+        gateUp.replaceSubrange((2 * row + 1) * hidden..<(2 * row + 2) * hidden,
+                               with: up[source..<source + hidden])
+    }
+
+    try writeQuantised(gateUp, rows: 2 * inner, cols: hidden, expert: expert,
+                       blocks: .gateUpBlocks, scales: .gateUpScales,
+                       layout: layout, writer: writer)
+    try writeQuantised(down, rows: hidden, cols: inner, expert: expert,
+                       blocks: .downBlocks, scales: .downScales,
+                       layout: layout, writer: writer)
+    return gateRaw.count + upRaw.count + downRaw.count
+}
+
+/// Quantises a row-major matrix to MXFP4 and writes both streams.
+///
+/// Per row rather than across the whole matrix: a block must not span two rows,
+/// or a row's last partial block would share an exponent with the next row.
+private func writeQuantised(
+    _ values: [Float], rows: Int, cols: Int, expert: Int,
+    blocks: ExpertLayout.Section, scales: ExpertLayout.Section,
+    layout: ExpertLayout, writer: PositionalWriter
+) throws {
+    let blocksPerRow = cols / MXFP4.blockSize
+    var packed = [UInt8](repeating: 0, count: rows * blocksPerRow * MXFP4.packedBytesPerBlock)
+    var scaleBytes = [UInt8](repeating: 127, count: rows * blocksPerRow)
+
+    for row in 0..<rows {
+        let (rowPacked, rowScales) = MXFP4.encode(Array(values[row * cols..<(row + 1) * cols]))
+        let packedStart = row * blocksPerRow * MXFP4.packedBytesPerBlock
+        packed.replaceSubrange(packedStart..<packedStart + rowPacked.count, with: rowPacked)
+        let scaleStart = row * blocksPerRow
+        scaleBytes.replaceSubrange(scaleStart..<scaleStart + rowScales.count, with: rowScales)
+    }
+
+    try packed.withUnsafeBytes {
+        try writer.write($0, at: layout.offset(expert: expert, section: blocks))
+    }
+    try scaleBytes.withUnsafeBytes {
+        try writer.write($0, at: layout.offset(expert: expert, section: scales))
+    }
+}
+
+/// Fetches one whole tensor and reports its shape.
+private func fetchNamedTensor(
+    _ name: String, _ catalog: Installer.Catalog, _ streamer: RangeStreamer
+) async throws -> (Data, [Int]) {
+    let (url, header) = try await catalog.header(forTensor: name)
+    let entry = try header.entry(name)
+    let range = try header.range(of: name)
+    let data = try await streamer.fetch(url: url, offset: range.offset, length: range.length)
+    return (data, entry.shape)
+}
+
+/// A counter that several fetches can add to.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return total }
+    func add(_ amount: Int) { lock.lock(); total += amount; lock.unlock() }
 }

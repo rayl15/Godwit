@@ -96,7 +96,11 @@ public final class RangeStreamer: Sendable {
 /// `pwrite` rather than seek-then-write so sections can be filled in whatever
 /// order they arrive, which is what lets the streamer redistribute a
 /// tensor-major download into an expert-major file.
-public final class PositionalWriter {
+/// `@unchecked Sendable` because every write goes to an explicit offset via
+/// `pwrite`, which does not touch the shared file position. Concurrent writes
+/// to disjoint ranges are safe, and the expert installer only ever issues
+/// disjoint ones — each expert owns its own stride.
+public final class PositionalWriter: @unchecked Sendable {
     private let fd: Int32
     public let path: String
 

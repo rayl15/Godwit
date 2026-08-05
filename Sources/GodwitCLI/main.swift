@@ -407,11 +407,22 @@ func runExpertVerification(directory: String) {
 
 func runInstall(directory: String, layerLimit: Int?, repository: String?) async {
     do {
-        // The spec is chosen by repository, so installing a different size is a
-        // flag rather than a code change. That is the claim being tested.
-        let spec: ArchitectureSpec = (repository ?? "").contains("20b")
-            ? .gptOSS20B : .gptOSS120B
-        let options = Installer.Options(repository: repository ?? "openai/gpt-oss-120b",
+        // The spec is chosen by repository, so installing a different model is
+        // a flag rather than a code change. That is the claim being tested.
+        //
+        // Resolved through ModelRegistry rather than by substring here: an
+        // unrecognised repository used to fall through to GPT-OSS-120B, which
+        // meant a typo installed a real model under the wrong architecture and
+        // said nothing until the weights were already on disk.
+        let name = repository ?? "openai/gpt-oss-120b"
+        guard let spec = ModelRegistry.spec(for: name) else {
+            let known = ModelRegistry.catalogue
+                .map { "  \($0.id)  \($0.title)" }.joined(separator: "\n")
+            FileHandle.standardError.write(Data(
+                "unknown model '\(name)'. Known:\n\(known)\n".utf8))
+            exit(2)
+        }
+        let options = Installer.Options(repository: name,
                                         layerLimit: layerLimit)
         let installer = Installer(spec: spec, options: options)
         let target = URL(fileURLWithPath: directory)
