@@ -399,7 +399,11 @@ kernel void expert_activation_swiglu(
 // row instead would run, produce plausible numbers, and be wrong.
 kernel void qk_head_rmsnorm(
     device half        *values   [[buffer(0)]],   // tokens * heads * head_dim
-    device const half  *weight   [[buffer(1)]],   // head_dim
+    // BF16, like every other small trunk tensor. Declaring this half reads the
+    // same bytes as a completely different number — an exponent field where
+    // the mantissa should be — and produced attention that was wrong by 370x
+    // what the format allows while still looking like plausible activations.
+    device const bfloat *weight   [[buffer(1)]],   // head_dim
     constant uint      &headDim  [[buffer(2)]],
     constant float     &epsilon  [[buffer(3)]],
     uint                head     [[threadgroup_position_in_grid]],

@@ -556,7 +556,7 @@ func runAttentionCheck(model: String, reference: String) {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
         let spec = reader.manifest.spec
-        let rope = RoPE(configuration: .gptOSS)
+        let rope = RoPE(configuration: .forSpec(spec))
         let attention = Attention(context: context, spec: spec, rope: rope)
 
         let refDir = URL(fileURLWithPath: reference)
@@ -633,7 +633,7 @@ func runLayerCheck(model: String, reference: String) {
     do {
         let context = try MetalContext()
         let reader = try ModelReader(directory: URL(fileURLWithPath: model))
-        let rope = RoPE(configuration: .gptOSS)
+        let rope = RoPE(configuration: .forSpec(reader.manifest.spec))
 
         let refDir = URL(fileURLWithPath: reference)
         let info = try JSONSerialization.jsonObject(

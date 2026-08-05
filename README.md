@@ -252,70 +252,40 @@ godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 | Resident | 5.7 GiB | 4.1 GiB |
 | Decode | 1.4 tok/s | **2.8–3.2 tok/s** |
 
-### Qwen3-30B-A3B: runs, but degraded
+### Qwen3-30B-A3B
 
 | | GPT-OSS-120B | Qwen3-30B-A3B |
 | --- | ---: | ---: |
 | Install | 59 GB | 16 GB |
 | Install time | ~3 h | 105 min |
-| Decode | 1.4 tok/s | 2.4 tok/s |
+| Decode | 1.4 tok/s | **2.3 tok/s** |
 | Time to first token | 10–13 s | 4.5 s |
 | Expert cache hit | ~60% | 45% |
 
-The engine is right and the output is not good enough to use. Both halves of
-that matter.
+It answers. The lower cache hit rate is structural: Qwen3 routes to eight
+experts per token against GPT-OSS's four, so it touches twice as many through
+the same eight slots.
 
-Right: the installed weights sit 18.5 dB from the checkpoint at every depth,
-which is exactly what MXFP4 costs and no more, and a control comparing against
-swapped gate/up ordering collapses to -3.0 dB, so the layout is correct rather
-than coincidentally plausible. It emits fluent English, correct ChatML, and the
-right facts — asked for the capital of France it says Paris.
+Getting there took one bug worth recording, because of how it presented. The
+model produced fluent English with correct facts and then could not stop —
+asked for the capital of France it would say Paris, doubt itself, and re-derive
+it until the token budget ran out. That looks exactly like quantisation damage,
+and MXFP4 costs Qwen3 18.9 dB where it costs GPT-OSS nothing, so the obvious
+conclusion was that 4 bits was not enough and the fix was a 30 GB int8 install.
 
-Not good enough: it then cannot stop. It restates the answer and re-checks it
-until the token budget runs out, with reasoning enabled or disabled, greedy or
-with Qwen3's own recommended sampling. It knows the answer and will not commit
-to it.
+It was not. The QK-norm weight was declared `half` in the Metal kernel where
+every other small trunk tensor is `bfloat` — the same bytes read as a different
+number. Attention was wrong by 370x what FP16 explains, while still producing
+grammatical text about the right subject.
 
-The likely cause is quantisation. GPT-OSS ships already on the MXFP4 grid and
-loses nothing; Qwen3 ships BF16, and putting it there costs 18.9 dB and about
-12% error on every expert's output. **This has not been proved** — the decisive
-test is comparing our logits against a NumPy reference built from the same
-installed bytes, as `check-layer` does for GPT-OSS, and that reference does not
-exist for Qwen3 yet. Until it does, a subtle bug in QK-norm or RoPE cannot be
-ruled out, though neither would usually leave grammar and facts intact.
+The check that found it took an hour: a NumPy reference for one Qwen3 attention
+block, built from the same installed bytes, compared against the GPU. Guessing
+would have cost three hours and the 120B install, and would not have worked.
 
-If quantisation is the cause, int8 experts would fix it at 45.3 dB and a 30.4 GB
-install.
-
-The 20B ran first time with no change beyond declaring the spec, which was a
-real but narrow result: same family, so tensor naming, RoPE, activation, sinks
-and tokeniser were never exercised.
-
-**Qwen3 was the actual test**, and it broke seven things rather than the five I
-had predicted. Two I had not seen at all:
-
-| | GPT-OSS | Qwen3 |
-| --- | --- | --- |
-| Experts on disk | stacked, already MXFP4 | one tensor each, BF16 |
-| Attention sinks | yes | no |
-| QK-norm | no | **yes** |
-| Quantisation | copied through | **we do it** |
-| Activation | clamped GLU, `+1` shift | plain SwiGLU |
-| RoPE | YaRN, factor 32 | plain, theta 1e6 |
-| Chat format | harmony | ChatML |
-
-Two of those deserve naming, because both would have run without complaint:
-
-**Attention sinks cannot be zeroed.** The sink enters the softmax denominator
-as `exp(sink - max)`, so a sink of 0.0 is not the identity — it adds a whole
-unit of mass to every row. It has to be compiled out, not set to nothing.
-
-**MXFP4 has to be written, not copied.** GPT-OSS ships on the 4-bit grid and
-loses nothing; Qwen3 is BF16 and costs 18.9 dB going onto it. The encoder is
-checked against OpenAI's own bytes — `godwit check-mxfp4` decodes an installed
-GPT-OSS expert and re-encodes it, and all 2,073,600 blocks must come back
-identical. That check caught a floored exponent and a dropped sign bit, either
-of which would have written quietly wrong weights.
+```bash
+python3 Scripts/analysis/qwen3_attention_reference.py qwen3.gwt 0 8 /tmp/ref
+godwit check-attention qwen3.gwt /tmp/ref
+```
 
 ## Prior art
 
