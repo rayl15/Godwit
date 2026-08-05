@@ -88,6 +88,11 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
     public let activationLimit: Float
     /// Sigmoid steepness for `gptOssClampedGLU`. GPT-OSS uses 1.702.
     public let activationAlpha: Float
+    /// Whether q and k are RMS-normalised per head before RoPE. Qwen3 does
+    /// this; GPT-OSS does not. Omitting it runs and is quietly wrong.
+    public let queryKeyNorm: Bool
+    /// Where this family keeps its tensors, and how its experts are stored.
+    public let naming: TensorNaming
     public let layers: [LayerSpec]
 
     public init(
@@ -109,6 +114,8 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         routerBias: Bool = false,
         activationLimit: Float = 7.0,
         activationAlpha: Float = 1.702,
+        queryKeyNorm: Bool = false,
+        naming: TensorNaming = .gptOSS,
         layers: [LayerSpec]
     ) {
         self.name = name
@@ -129,6 +136,8 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         self.routerBias = routerBias
         self.activationLimit = activationLimit
         self.activationAlpha = activationAlpha
+        self.queryKeyNorm = queryKeyNorm
+        self.naming = naming
         self.layers = layers
     }
 
@@ -173,6 +182,11 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
         routerBias = try container.decodeIfPresent(Bool.self, forKey: .routerBias) ?? false
         activationLimit = try container.decodeIfPresent(Float.self, forKey: .activationLimit) ?? 7.0
         activationAlpha = try container.decodeIfPresent(Float.self, forKey: .activationAlpha) ?? 1.702
+        // Both added when Qwen3 arrived. An install predating them is GPT-OSS,
+        // which has neither QK-norm nor any naming but its own — so the
+        // defaults reproduce exactly what that install already assumed.
+        queryKeyNorm = try container.decodeIfPresent(Bool.self, forKey: .queryKeyNorm) ?? false
+        naming = try container.decodeIfPresent(TensorNaming.self, forKey: .naming) ?? .gptOSS
     }
 }
 
@@ -200,6 +214,43 @@ extension ArchitectureSpec {
     }
 
     /// The shape both GPT-OSS sizes share.
+    /// Qwen3-30B-A3B. The first non-GPT-OSS family, and the one that decides
+    /// whether `ArchitectureSpec` describes a model or merely parameterises
+    /// one. It differs in almost everything that GPT-OSS fixed: no attention
+    /// sinks, no biases, no sliding window, plain RoPE, plain SwiGLU, and
+    /// QK-norm, which nothing here had before.
+    public static var qwen3MoE30B: ArchitectureSpec {
+        let layers = (0..<48).map { _ in
+            LayerSpec(attention: .full, window: 0,
+                      routedExpertCount: 128, expertsPerToken: 8,
+                      hasSharedExpert: false)
+        }
+        return ArchitectureSpec(
+            name: "qwen3-30b-a3b",
+            hiddenSize: 2048,
+            // The expert inner width, 768, not the dense one. Qwen3 also has a
+            // 6144 `intermediate_size`, which no routed layer uses — every
+            // layer here is MoE, so carrying the dense figure would size the
+            // expert buffers eight times too large.
+            intermediateSize: 768,
+            attentionHeads: 32,
+            keyValueHeads: 4,
+            headDimension: 128,
+            vocabularySize: 151936,
+            ropeTheta: 1_000_000,
+            rmsNormEpsilon: 1e-6,
+            activation: .silu,
+            logitSoftcap: nil,
+            tiedEmbedding: false,
+            attentionSinks: false,
+            attentionBias: false,
+            expertBias: false,
+            routerBias: false,
+            queryKeyNorm: true,
+            naming: .qwen3MoE,
+            layers: layers)
+    }
+
     private static func gptOSS(layers layerCount: Int, experts: Int,
                                name: String) -> ArchitectureSpec {
         // Alternating sliding and full attention, starting sliding.
@@ -228,6 +279,8 @@ extension ArchitectureSpec {
             attentionBias: true,
             expertBias: true,
             routerBias: true,
+            queryKeyNorm: false,
+            naming: .gptOSS,
             layers: layers)
     }
 }
