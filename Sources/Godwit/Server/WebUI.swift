@@ -380,13 +380,33 @@ enum WebUI {
         }
 
         function drawRange() {
-          if (!rangeMap) return;
+          if (!rangeMap && !missingDir) return;
           const dpr = window.devicePixelRatio || 1;
           const w = sky.clientWidth, h = sky.clientHeight;
           sky.width = w * dpr; sky.height = h * dpr;
           const g = sky.getContext('2d');
           g.scale(dpr, dpr);
           g.fillStyle = '#08090b'; g.fillRect(0, 0, w, h);
+
+          // A blank canvas under a one-line footnote reads as broken. Say what
+          // is missing where the eye already is, and how to produce it.
+          if (!rangeMap) {
+            g.textAlign = 'center';
+            g.fillStyle = '#8b8783';
+            g.font = '600 15px ui-monospace, SFMono-Regular, Menlo, monospace';
+            g.fillText('No range map for this model.', w / 2, h / 2 - 30);
+            g.fillStyle = '#6f6b67';
+            g.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+            g.fillText('It is measured rather than shipped. Probe the router to build one:',
+                       w / 2, h / 2);
+            g.fillStyle = '#d98b4a';
+            g.fillText('godwit range --model ' + missingDir + ' -o ' + missingDir
+                       + '/range.json', w / 2, h / 2 + 26);
+            g.fillStyle = '#6f6b67';
+            g.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+            g.fillText('A few minutes. Reload when it finishes.', w / 2, h / 2 + 52);
+            return;
+          }
 
           // Far points first so near ones sit on top.
           const drawn = rangeMap.points.map(p => ({ p: p, v: project(p, w, h) }))
@@ -462,7 +482,9 @@ enum WebUI {
         fetch('/api/range').then(r => r.ok ? r.json() : null).then(data => {
           const note = document.getElementById('range-note');
           if (!data || !data.points || !data.points.length) {
-            note.textContent = 'no range map — run: godwit range --model <dir> -o range.json';
+            note.textContent = 'no range map for this model';
+            missingDir = picker.dataset.current || '<dir>';
+            drawRange();       // sizes the canvas itself
             return;
           }
           rangeMap = data;
@@ -494,6 +516,10 @@ enum WebUI {
         });
         window.addEventListener('resize', drawRange);
 
+
+        // Set once we know a range map is absent, to the directory whose map
+        // is missing. Null while a map is present or still loading.
+        let missingDir = null;
 
         // ---- Models ----
         // One <select> holds both what is installed and what can be installed,
@@ -547,6 +573,7 @@ enum WebUI {
             picker.insertBefore(o, picker.firstChild);
           }
           picker.dataset.current = d.active || '';
+          if (missingDir !== null && d.active) { missingDir = d.active; drawRange(); }
           if (d.installing) startWatching(d.installing);
         }
 
