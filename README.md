@@ -162,6 +162,7 @@ Try the pipeline without the full transfer by installing a single layer:
 | `generate` | Raw token-in, token-out, for scripting |
 | `logits` | Run the full model and show next-token candidates |
 | `check-expert`, `check-attention`, `check-layer`, `verify-expert` | Compare against NumPy references |
+| `check-mxfp4` | Re-encode installed MXFP4 and demand byte equality |
 | `bench dequant`, `ab-kernel` | Kernel throughput and A/B testing |
 | `trace-layers`, `trace-routing` | Measure routing behaviour |
 
@@ -220,7 +221,7 @@ arithmetic, and why the GPU sits idle 82% of the time.
 ## Development
 
 ```bash
-Scripts/test.sh              # 58 tests; works without full Xcode
+Scripts/test.sh              # 82 tests; works without full Xcode
 Scripts/ab_kernel.sh         # A/B two kernels with thermal drift controlled
 python3 Scripts/analysis/verify_install.py model.gwt
 ```
@@ -236,10 +237,11 @@ a complete layer including exact expert selection, and the tokeniser against
 
 ## Model support
 
-**GPT-OSS-120B and GPT-OSS-20B**, from one binary. Selecting a size is a flag:
+**GPT-OSS-120B, GPT-OSS-20B and Qwen3-30B-A3B**, from one binary. Selecting a
+model is a flag:
 
 ```bash
-godwit install --output 20b.gwt --model-id openai/gpt-oss-20b
+godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 ```
 
 | | 120B | 20B |
@@ -250,20 +252,37 @@ godwit install --output 20b.gwt --model-id openai/gpt-oss-20b
 | Resident | 5.7 GiB | 4.1 GiB |
 | Decode | 1.4 tok/s | **2.8–3.2 tok/s** |
 
-The 20B was added to test a claim rather than to be useful — MLX runs it far
-faster, and if it suits your task you should use that. What it establishes is
-that `ArchitectureSpec` genuinely drives the runtime: it differs from the 120B
-in exactly two numbers, and it ran first time with no change beyond declaring
-the spec.
+Qwen3-30B-A3B installs at 17.5 GB and activates 3.3B parameters per token.
 
-That is a real but narrow result. Both are the same family, so tensor naming,
-RoPE variant, activation, attention sinks and tokeniser were never exercised.
-A different family still needs work in five known places: the thirteen
-hardcoded tensor names in the installer, YaRN-only RoPE, the single activation
-implemented in the kernel, the assumption that attention sinks exist, and the
-harmony chat template. Qwen3 is the next real test, and it will break the
-"one expert is one contiguous byte range" assumption because it stores experts
-per-tensor rather than stacked.
+The 20B ran first time with no change beyond declaring the spec, which was a
+real but narrow result: same family, so tensor naming, RoPE, activation, sinks
+and tokeniser were never exercised.
+
+**Qwen3 was the actual test**, and it broke seven things rather than the five I
+had predicted. Two I had not seen at all:
+
+| | GPT-OSS | Qwen3 |
+| --- | --- | --- |
+| Experts on disk | stacked, already MXFP4 | one tensor each, BF16 |
+| Attention sinks | yes | no |
+| QK-norm | no | **yes** |
+| Quantisation | copied through | **we do it** |
+| Activation | clamped GLU, `+1` shift | plain SwiGLU |
+| RoPE | YaRN, factor 32 | plain, theta 1e6 |
+| Chat format | harmony | ChatML |
+
+Two of those deserve naming, because both would have run without complaint:
+
+**Attention sinks cannot be zeroed.** The sink enters the softmax denominator
+as `exp(sink - max)`, so a sink of 0.0 is not the identity — it adds a whole
+unit of mass to every row. It has to be compiled out, not set to nothing.
+
+**MXFP4 has to be written, not copied.** GPT-OSS ships on the 4-bit grid and
+loses nothing; Qwen3 is BF16 and costs 18.9 dB going onto it. The encoder is
+checked against OpenAI's own bytes — `godwit check-mxfp4` decodes an installed
+GPT-OSS expert and re-encodes it, and all 2,073,600 blocks must come back
+identical. That check caught a floored exponent and a dropped sign bit, either
+of which would have written quietly wrong weights.
 
 ## Prior art
 
