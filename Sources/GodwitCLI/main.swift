@@ -399,10 +399,15 @@ func runExpertVerification(directory: String) {
     }
 }
 
-func runInstall(directory: String, layerLimit: Int?) async {
+func runInstall(directory: String, layerLimit: Int?, repository: String?) async {
     do {
-        let options = Installer.Options(layerLimit: layerLimit)
-        let installer = Installer(options: options)
+        // The spec is chosen by repository, so installing a different size is a
+        // flag rather than a code change. That is the claim being tested.
+        let spec: ArchitectureSpec = (repository ?? "").contains("20b")
+            ? .gptOSS20B : .gptOSS120B
+        let options = Installer.Options(repository: repository ?? "openai/gpt-oss-120b",
+                                        layerLimit: layerLimit)
+        let installer = Installer(spec: spec, options: options)
         let target = URL(fileURLWithPath: directory)
 
         let started = Date()
@@ -761,11 +766,13 @@ case "bench" where arguments.dropFirst().first == "dequant":
 case "install":
     var target: String?
     var limit: Int?
+    var repo: String?
     var rest = arguments.dropFirst().makeIterator()
     while let flag = rest.next() {
         switch flag {
         case "--output", "-o": target = rest.next()
         case "--layers": limit = rest.next().flatMap(Int.init)
+        case "--model-id": repo = rest.next()
         default:
             FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
             exit(2)
@@ -773,10 +780,10 @@ case "install":
     }
     guard let target else {
         FileHandle.standardError.write(Data(
-            "usage: godwit install --output <dir> [--layers N]\n".utf8))
+            "usage: godwit install --output <dir> [--model-id repo] [--layers N]\n".utf8))
         exit(2)
     }
-    await runInstall(directory: target, layerLimit: limit)
+    await runInstall(directory: target, layerLimit: limit, repository: repo)
 case "trace-layers":
     var traceModel: String?
     var traceLayers = 36

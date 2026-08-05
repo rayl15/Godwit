@@ -106,3 +106,55 @@ struct ExpertActivationTests {
         #expect(Self.reference(gate: 1, up: -50) == Self.reference(gate: 1, up: -7))
     }
 }
+
+@Suite("GPT-OSS-20B architecture")
+struct GptOSS20BTests {
+    let small = ArchitectureSpec.gptOSS20B
+    let large = ArchitectureSpec.gptOSS120B
+
+    @Test("Matches the published config")
+    func matchesConfig() {
+        #expect(small.layerCount == 24)
+        #expect(small.layers[0].routedExpertCount == 32)
+        #expect(small.maxExpertsPerToken == 4)
+        #expect(small.hiddenSize == 2880)
+        #expect(small.vocabularySize == 201088)
+    }
+
+    @Test("Differs from the 120B in exactly two dimensions")
+    func differsOnlyInSize() {
+        // The point of supporting this model is to test whether the spec
+        // actually drives the runtime. If anything else differed, a successful
+        // run would not tell us that.
+        #expect(small.hiddenSize == large.hiddenSize)
+        #expect(small.intermediateSize == large.intermediateSize)
+        #expect(small.attentionHeads == large.attentionHeads)
+        #expect(small.keyValueHeads == large.keyValueHeads)
+        #expect(small.headDimension == large.headDimension)
+        #expect(small.vocabularySize == large.vocabularySize)
+        #expect(small.ropeTheta == large.ropeTheta)
+        #expect(small.activation == large.activation)
+        #expect(small.attentionSinks == large.attentionSinks)
+        #expect(small.attentionBias == large.attentionBias)
+        #expect(small.tiedEmbedding == large.tiedEmbedding)
+
+        #expect(small.layerCount != large.layerCount)
+        #expect(small.layers[0].routedExpertCount != large.layers[0].routedExpertCount)
+    }
+
+    @Test("Attention still alternates, and the window is unchanged")
+    func attentionPattern() {
+        #expect(small.layers.filter { $0.attention == .sliding }.count == 12)
+        #expect(small.layers.filter { $0.attention == .full }.count == 12)
+        #expect(small.layers.allSatisfy { $0.window == 128 })
+    }
+
+    @Test("Derived install size matches the published checkpoint")
+    func derivedSize() {
+        let perExpert = 2 * small.intermediateSize * small.hiddenSize
+            + small.hiddenSize * small.intermediateSize
+        let routedGiB = Double(perExpert) * 4.25 / 8 * 32 * 24 / 1_073_741_824
+        // ~9.5 GiB of routed experts against the 120B's 56.7.
+        #expect(routedGiB > 9 && routedGiB < 10, "got \(routedGiB) GiB")
+    }
+}

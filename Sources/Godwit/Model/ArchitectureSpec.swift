@@ -177,6 +177,18 @@ public struct ArchitectureSpec: Codable, Sendable, Equatable {
 }
 
 extension ArchitectureSpec {
+    /// GPT-OSS-20B — the same architecture at two thirds the depth and a
+    /// quarter the experts.
+    ///
+    /// It exists to test whether this type actually drives the runtime. Every
+    /// other property is identical to the 120B: same tensor names, same MXFP4,
+    /// same YaRN, same attention sinks, same clamped GLU, same tokeniser. Only
+    /// `num_hidden_layers` and `num_local_experts` differ, so if it needs any
+    /// code change beyond this declaration, the parameterisation is a fiction.
+    public static var gptOSS20B: ArchitectureSpec {
+        gptOSS(layers: 24, experts: 32, name: "gpt-oss-20b")
+    }
+
     /// GPT-OSS-120B, transcribed from the published `config.json` and confirmed
     /// against the safetensors header (see `Scripts/analysis/fetch_expert.py`).
     ///
@@ -184,17 +196,23 @@ extension ArchitectureSpec {
     /// attention, experts, and router — all present here and absent from most
     /// contemporary models.
     public static var gptOSS120B: ArchitectureSpec {
-        // 36 layers alternating sliding and full attention, starting sliding.
-        let layers = (0..<36).map { index in
+        gptOSS(layers: 36, experts: 128, name: "gpt-oss-120b")
+    }
+
+    /// The shape both GPT-OSS sizes share.
+    private static func gptOSS(layers layerCount: Int, experts: Int,
+                               name: String) -> ArchitectureSpec {
+        // Alternating sliding and full attention, starting sliding.
+        let layers = (0..<layerCount).map { index in
             LayerSpec(
                 attention: index.isMultiple(of: 2) ? .sliding : .full,
                 window: 128,
-                routedExpertCount: 128,
+                routedExpertCount: experts,
                 expertsPerToken: 4,
                 hasSharedExpert: false)
         }
         return ArchitectureSpec(
-            name: "gpt-oss-120b",
+            name: name,
             hiddenSize: 2880,
             intermediateSize: 2880,
             attentionHeads: 64,
