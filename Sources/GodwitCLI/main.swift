@@ -328,7 +328,13 @@ func runServe(model: String, port: UInt16, slots: Int,
               settings: Sampler.Settings, maxTokens: Int) {
     do {
         FileHandle.standardError.write(Data("loading model...\n".utf8))
-        let server = try ChatServer(directory: URL(fileURLWithPath: model),
+        // `--model` names one install; the registry root is its parent, so the
+        // dashboard can offer whatever else is installed alongside it.
+        let target = URL(fileURLWithPath: model)
+        let server = try ChatServer(root: target.deletingLastPathComponent(),
+                                    initial: FileManager.default.fileExists(
+                                        atPath: target.appendingPathComponent("manifest.json").path)
+                                        ? target : nil,
                                     slots: slots, settings: settings, maxTokens: maxTokens)
         try server.listen(port: port)
     } catch {

@@ -2,61 +2,96 @@ import Foundation
 
 /// Serves the dashboard and streams generation to it.
 ///
-/// One model, one turn at a time. There is a single set of expert slots and a
-/// single Metal queue, so concurrent requests would interleave into each
-/// other's cache; the second caller waits.
+/// One model is loaded at a time. There is a single set of expert slots and a
+/// single Metal queue, so two resident models would compete for both — and on
+/// a 16 GB machine two expert caches would not fit anyway. Switching releases
+/// the old one before loading the new.
 public final class ChatServer {
+    /// Everything tied to one loaded model.
+    private final class Loaded {
+        let directory: URL
+        let reader: ModelReader
+        let runner: ModelRunner
+        let tokenizer: Tokenizer
+        let weights: ModelRunner.Weights
+        let expertCache: ExpertCache
+
+        init(directory: URL, context: MetalContext, slots: Int) throws {
+            self.directory = directory
+            self.reader = try ModelReader(directory: directory)
+            self.tokenizer = try reader.loadTokenizer()
+            self.runner = ModelRunner(context: context, reader: reader)
+            self.weights = try runner.loadWeights()
+            self.expertCache = try runner.makeExpertCache(slots: slots)
+        }
+    }
+
     private let context: MetalContext
-    private let reader: ModelReader
-    private let runner: ModelRunner
-    private let tokenizer: Tokenizer
-    private let weights: ModelRunner.Weights
-    private let expertCache: ExpertCache
+    private let registry: ModelRegistry
     private let settings: Sampler.Settings
     private let maxTokens: Int
     private let system: String
+    private let slots: Int
     private let turnLock = NSLock()
+    private var loaded: Loaded?
+    /// Set while an install is running, so a second one is refused.
+    private var installing: String?
 
-    private let directory: URL
-
-    public init(directory: URL, slots: Int = 8, settings: Sampler.Settings = Sampler.Settings(),
+    public init(root: URL, initial: URL? = nil, slots: Int = 8,
+                settings: Sampler.Settings = Sampler.Settings(),
                 maxTokens: Int = 1024,
                 system: String = "You are a helpful assistant.") throws {
-        self.directory = directory
         self.context = try MetalContext()
-        self.reader = try ModelReader(directory: directory)
-        self.tokenizer = try reader.loadTokenizer()
-        self.runner = ModelRunner(context: context, reader: reader)
-        self.weights = try runner.loadWeights()
-        self.expertCache = try runner.makeExpertCache(slots: slots)
+        self.registry = ModelRegistry(root: root)
         self.settings = settings
         self.maxTokens = maxTokens
         self.system = system
+        self.slots = slots
+        if let initial {
+            self.loaded = try Loaded(directory: initial, context: context, slots: slots)
+        }
+    }
+
+    /// Loads a model, releasing the previous one first.
+    ///
+    /// The order matters on a machine this size: holding both while the new one
+    /// allocates would need the sum of two expert caches.
+    private func load(directory: URL) throws {
+        turnLock.lock()
+        defer { turnLock.unlock() }
+        loaded = nil
+        loaded = try Loaded(directory: directory, context: context, slots: slots)
     }
 
     public func listen(port: UInt16) throws {
-        let spec = reader.manifest.spec
-        let trunkBytes = reader.manifest.trunkSections.reduce(0) { $0 + $1.length }
-        let page = WebUI.page(
-            model: reader.manifest.model,
-            layers: reader.manifest.layerCount,
-            experts: reader.manifest.expertCount,
-            topK: spec.maxExpertsPerToken,
-            slots: expertCache.slotCount,
-            cacheGiB: Double(expertCache.byteCount) / 1_073_741_824,
-            trunkGiB: Double(trunkBytes) / 1_073_741_824)
-
         let server = HTTPServer(port: port) { [weak self] request in
             guard let self else { return .notFound }
             switch request.path {
             case "/":
-                return .ok(contentType: "text/html; charset=utf-8", body: Data(page.utf8))
-            case "/api/range":
-                // Optional: the dashboard shows a hint when it is absent.
-                let path = directory.appendingPathComponent("range.json")
-                guard let data = try? Data(contentsOf: path) else {
-                    return .json("{\"points\":[]}")
+                return .ok(contentType: "text/html; charset=utf-8",
+                           body: Data(self.page().utf8))
+            case "/api/models":
+                return .json(self.modelsJSON())
+            case "/api/select":
+                guard let name = request.query["name"] else {
+                    return .json("{\"error\":\"missing name\"}")
                 }
+                do {
+                    try self.load(directory: self.registry.root.appendingPathComponent(name))
+                    return .json("{\"ok\":true}")
+                } catch {
+                    return .json("{\"error\":\(Self.quoted("\(error)"))}")
+                }
+            case "/api/install":
+                guard let id = request.query["id"] else {
+                    return .json("{\"error\":\"missing id\"}")
+                }
+                return .stream { stream in self.install(id: id, to: stream) }
+            case "/api/range":
+                guard let loaded = self.loaded,
+                      let data = try? Data(contentsOf:
+                        loaded.directory.appendingPathComponent("range.json"))
+                else { return .json("{\"points\":[]}") }
                 return .ok(contentType: "application/json", body: data)
             case "/api/chat":
                 guard let question = request.query["q"], !question.isEmpty else {
@@ -70,13 +105,113 @@ public final class ChatServer {
 
         try server.start()
         print("Godwit dashboard on http://127.0.0.1:\(port)")
-        print("model \(reader.manifest.model), \(expertCache.slotCount) expert slots")
+        print("models in \(registry.root.path)")
+        for model in registry.installed() {
+            print("  \(model.name)  \(model.layers)L x \(model.experts)E  "
+                  + String(format: "%.1f GiB", Double(model.bytes) / 1_073_741_824))
+        }
         server.run()
+    }
+
+    private func page() -> String {
+        let spec = loaded?.reader.manifest.spec
+        return WebUI.page(
+            model: loaded?.reader.manifest.model ?? "none loaded",
+            layers: loaded?.reader.manifest.layerCount ?? 36,
+            experts: loaded?.reader.manifest.expertCount ?? 128,
+            topK: spec?.maxExpertsPerToken ?? 4,
+            slots: slots,
+            cacheGiB: Double(loaded?.expertCache.byteCount ?? 0) / 1_073_741_824,
+            trunkGiB: Double(loaded?.reader.manifest.trunkSections
+                .reduce(0) { $0 + $1.length } ?? 0) / 1_073_741_824)
+    }
+
+    private func modelsJSON() -> String {
+        let encoder = JSONEncoder()
+        let installed = (try? encoder.encode(registry.installed()))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let available = (try? encoder.encode(ModelRegistry.catalogue))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let active = loaded.map { Self.quoted($0.directory.lastPathComponent) } ?? "null"
+        let busy = installing.map { Self.quoted($0) } ?? "null"
+        return "{\"installed\":\(installed),\"available\":\(available),"
+            + "\"active\":\(active),\"installing\":\(busy)}"
+    }
+
+    /// Streams an install, then loads what it produced.
+    private func install(id: String, to stream: HTTPServer.EventStream) {
+        guard ModelRegistry.spec(for: id) != nil else {
+            stream.send(event: "error", json: "{\"message\":\"unsupported model\"}")
+            return
+        }
+        turnLock.lock()
+        if installing != nil {
+            turnLock.unlock()
+            stream.send(event: "error", json: "{\"message\":\"an install is already running\"}")
+            return
+        }
+        installing = id
+        turnLock.unlock()
+        defer { turnLock.lock(); installing = nil; turnLock.unlock() }
+
+        let name = id.split(separator: "/").last.map(String.init) ?? "model"
+        let target = registry.root.appendingPathComponent("\(name).gwt")
+
+        // An install takes hours. Run it to completion even if the browser tab
+        // that started it goes away — the bytes are worth more than the stream.
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var failure: Error?
+        Task {
+            do {
+                let installer = Installer(spec: ModelRegistry.spec(for: id)!,
+                                          options: .init(repository: id))
+                _ = try await installer.install(to: target) { progress in
+                    stream.send(event: "progress", json: """
+                        {"stage":\(Self.quoted(progress.stage)),\
+                        "done":\(progress.completed),"total":\(progress.total),\
+                        "bytes":\(progress.bytesWritten)}
+                        """)
+                }
+            } catch { failure = error }
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        if let failure {
+            stream.send(event: "error", json: "{\"message\":\(Self.quoted("\(failure)"))}")
+            return
+        }
+        stream.send(event: "done", json: "{\"name\":\(Self.quoted("\(name).gwt"))}")
+    }
+
+    private static func quoted(_ text: String) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                out += scalar.value < 0x20 ? String(format: "\\u%04x", scalar.value)
+                                           : String(scalar)
+            }
+        }
+        return out + "\""
     }
 
     private func generate(question: String, to stream: HTTPServer.EventStream) {
         turnLock.lock()
         defer { turnLock.unlock() }
+
+        guard let loaded else {
+            stream.send(event: "token", json: "{\"text\":\"no model loaded\"}")
+            stream.send(event: "done", json: "{}")
+            return
+        }
+        let runner = loaded.runner, tokenizer = loaded.tokenizer
+        let weights = loaded.weights, expertCache = loaded.expertCache
 
         do {
             var conversation = Conversation(system: system)
@@ -151,7 +286,9 @@ public final class ChatServer {
 
     /// JSON string escaping. Server-sent events are newline-delimited, so an
     /// unescaped newline in a reply would truncate the frame.
-    private func quote(_ text: String) -> String {
+    private func quote(_ text: String) -> String { Self.quoted(text) }
+
+    private func unusedQuote(_ text: String) -> String {
         var out = "\""
         for character in text.unicodeScalars {
             switch character {

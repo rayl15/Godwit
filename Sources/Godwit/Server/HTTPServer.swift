@@ -18,7 +18,11 @@ public final class HTTPServer {
     }
 
     /// A response that streams as it is produced, for token-by-token output.
-    public final class EventStream {
+    ///
+    /// `@unchecked Sendable` because every mutable field is guarded by the lock
+    /// and the descriptor is immutable — an install runs on a task and writes
+    /// progress from it while the request thread waits.
+    public final class EventStream: @unchecked Sendable {
         private let socket: Int32
         private let lock = NSLock()
         public private(set) var isOpen = true

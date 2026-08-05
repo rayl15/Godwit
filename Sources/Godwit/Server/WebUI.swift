@@ -102,6 +102,25 @@ enum WebUI {
         .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 5px;
                   vertical-align: -1px; }
         .empty { color: var(--faint); text-align: center; margin-top: 80px; }
+        .model {
+          display: block; width: 100%; text-align: left; background: #0e1013;
+          border: 1px solid var(--line); color: var(--text); font: inherit;
+          padding: 7px 9px; margin-bottom: 5px; cursor: pointer;
+        }
+        .model:hover { border-color: var(--accent-dim); }
+        .model.on { border-color: var(--accent); background: #1a1512; }
+        .model.busy { opacity: .5; cursor: wait; }
+        .model b { display: block; font-weight: 600; font-size: 12px; }
+        .model span { color: var(--faint); font-size: 10px; }
+        .model.partial b::after { content: ' · partial'; color: var(--faint); font-weight: 400; }
+        .get {
+          display: block; width: 100%; text-align: left; background: none;
+          border: 1px dashed var(--line); color: var(--dim); font: inherit;
+          padding: 6px 9px; margin-top: 5px; cursor: pointer; font-size: 11px;
+        }
+        .get:hover { border-color: var(--accent-dim); color: var(--text); }
+        .bar-sm { height: 3px; background: var(--line); margin-top: 5px; }
+        .bar-sm div { height: 100%; background: var(--accent); width: 0 }
         #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
                background: #08090b; border: 1px solid var(--line); }
         #sky:active { cursor: grabbing; }
@@ -118,7 +137,13 @@ enum WebUI {
           <div class="brand"><h1>Godwit</h1><span>MAX RANGE, MIN PAYLOAD</span></div>
 
           <section>
-            <h2>Model</h2>
+            <h2>Models</h2>
+            <div id="models"></div>
+            <div id="install-box"></div>
+          </section>
+
+          <section>
+            <h2>Active</h2>
             <div class="row"><span>\(model)</span></div>
             <div class="row"><span>layers</span><span>\(layers)</span></div>
             <div class="row"><span>experts</span><span>\(experts) · top-\(topK)</span></div>
@@ -462,6 +487,87 @@ enum WebUI {
           drawRange();
         });
         window.addEventListener('resize', drawRange);
+
+
+        // ---- Models: list, switch, install ----
+        // Switching releases the old model before loading the new one, which
+        // takes a moment, so the UI locks rather than pretending it is instant.
+        let switching = false;
+
+        function fmtGiB(b) { return (b / 1073741824).toFixed(1) + ' GiB'; }
+
+        async function refreshModels() {
+          const d = await (await fetch('/api/models')).json();
+          const box = $('models');
+          box.innerHTML = '';
+
+          for (const m of d.installed) {
+            const b = document.createElement('button');
+            b.className = 'model' + (m.name === d.active ? ' on' : '')
+              + (m.complete ? '' : ' partial');
+            b.innerHTML = '<b>' + m.model.split('/').pop() + '</b><span>'
+              + m.layers + ' layers · ' + m.experts + ' experts · ' + fmtGiB(m.bytes)
+              + '</span>';
+            b.onclick = () => selectModel(m.name, b);
+            box.appendChild(b);
+          }
+
+          const have = new Set(d.installed.map(m => m.model));
+          const get = $('install-box');
+          get.innerHTML = '';
+          for (const a of d.available) {
+            if (have.has(a.id)) continue;
+            const b = document.createElement('button');
+            b.className = 'get';
+            b.textContent = '↓ install ' + a.title + '  (' + fmtGiB(a.bytes) + ')';
+            b.title = a.note;
+            b.onclick = () => installModel(a, b);
+            get.appendChild(b);
+          }
+        }
+
+        async function selectModel(name, el) {
+          if (switching || busy || el.classList.contains('on')) return;
+          switching = true;
+          document.querySelectorAll('.model').forEach(x => x.classList.add('busy'));
+          $('status').textContent = 'loading';
+          const r = await (await fetch('/api/select?name=' + encodeURIComponent(name))).json();
+          switching = false;
+          $('status').textContent = 'idle';
+          if (r.error) { alert(r.error); await refreshModels(); return; }
+          // The page is built from the loaded model's shape — layer count and
+          // expert count size the grid — so it has to be rebuilt, not patched.
+          location.reload();
+        }
+
+        function installModel(a, el) {
+          if (switching || busy) return;
+          el.disabled = true;
+          const bar = document.createElement('div');
+          bar.className = 'bar-sm';
+          bar.innerHTML = '<div></div>';
+          el.after(bar);
+          const fill = bar.firstChild;
+
+          const src = new EventSource('/api/install?id=' + encodeURIComponent(a.id));
+          src.addEventListener('progress', e => {
+            const p = JSON.parse(e.data);
+            fill.style.width = Math.min(100, p.bytes / a.bytes * 100) + '%';
+            el.textContent = '↓ ' + a.title + '  ' + p.stage + ' ' + p.done + '/' + p.total
+              + '  ' + fmtGiB(p.bytes);
+          });
+          src.addEventListener('done', () => {
+            src.close(); bar.remove(); refreshModels();
+          });
+          src.addEventListener('error', e => {
+            src.close();
+            el.textContent = '× ' + a.title + ' — ' + (JSON.parse(e.data || '{}').message || 'failed');
+            el.disabled = false;
+          });
+          src.onerror = () => { src.close(); el.disabled = false; };
+        }
+
+        refreshModels();
 
         $('send').onclick = ask;
         $('input').addEventListener('keydown', e => {
