@@ -19,6 +19,8 @@ public struct TransformerLayer {
 
     private let attention: Attention
     private let router: Router
+    /// Whether to run this layer's router early and prefetch on the guess.
+    public var lookahead = false
     private let experts: ExpertRunner
 
     public init(context: MetalContext, reader: ModelReader, index: Int, rope: RoPE) {
@@ -85,6 +87,43 @@ public struct TransformerLayer {
         var stream = hidden
 
         // --- Attention block ---
+        // --- Speculative routing ---
+        //
+        // The router that decides this layer's experts normally runs after
+        // attention. Run it now, on the residual entering the layer, and start
+        // the reads: measured at 87-91% of the real selection, with the
+        // top-weighted expert recovered over 99% of the time
+        // (Scripts/analysis/lookahead_accuracy.py). Whatever it gets right is
+        // resident by the time the true routing arrives; whatever it gets
+        // wrong is a read that would have happened anyway plus one that would
+        // not have.
+        //
+        // This only pays while attention is running, which on this hardware is
+        // a small share of decode. It is not free, so it is switchable.
+        // Decode only. In prefill the union of every token's experts routinely
+        // exceeds the slot count, so speculating there evicts faster than it
+        // reads and the reads never settle. Prefill is also already
+        // expert-major, which is the win that matters for it.
+        if lookahead, tokenCount == 1, let expertCache,
+           spec.layers[index].routedExpertCount > 0 {
+            let guessInput = try normalise(hidden, tokenCount: tokenCount,
+                                           weight: weights.postNorm)
+            var guessed = Set<Int>()
+            for token in 0..<tokenCount {
+                let lo = token * width, hi = (token + 1) * width
+                let slice = Array(guessInput[lo..<hi])
+                let decision = try router.route(hidden: slice,
+                                                weight: weights.routerWeight,
+                                                bias: weights.routerBias)
+                guessed.formUnion(decision.experts)
+            }
+            // Never ask for more than fits: a speculation that evicts its own
+            // earlier reads is worse than none.
+            let room = min(guessed.count, expertCache.slotCount)
+            expertCache.prefetch(layer: index,
+                                 experts: Array(guessed).sorted().prefix(room).map { $0 })
+        }
+
         var normed = try timed("cpu:norm") {
             try normalise(stream, tokenCount: tokenCount, weight: weights.inputNorm)
         }
@@ -123,6 +162,10 @@ public struct TransformerLayer {
             decisions.append(try router.route(hidden: slice,
                                               weight: weights.routerWeight,
                                               bias: weights.routerBias))
+        }
+
+        if lookahead, tokenCount == 1, let expertCache {
+            try expertCache.settlePrefetch(layer: index)
         }
 
         let offsets = experts.sectionOffsets

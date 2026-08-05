@@ -28,6 +28,9 @@ public final class ExpertCache {
         public var hits = 0
         public var misses = 0
         public var bytesRead = 0
+        /// Experts read on a guess, before the routing was known.
+        public var speculativeReads = 0
+        public var speculativeBytes = 0
         public var hitRate: Double {
             let total = hits + misses
             return total == 0 ? 0 : Double(hits) / Double(total)
@@ -139,13 +142,54 @@ public final class ExpertCache {
     /// The planner has already assigned each miss a distinct slot, disjoint
     /// from every hit slot in the same plan, so the caller may run hit experts
     /// on the GPU while the reads are in flight.
-    public func acquireAsync(layer: Int, experts: [Int]) -> Acquisition {
+    /// Reads that a speculative fetch has in flight, per layer.
+    ///
+    /// The planner hands out slots, so a speculative read and a later real one
+    /// can be assigned the same slot. Settling before the real plan is what
+    /// stops the second write landing under the first.
+    private var pending: [Int: Acquisition] = [:]
+    private let pendingLock = NSLock()
+
+    /// Starts reading experts that are probably about to be needed.
+    ///
+    /// The caller is guessing — `lookahead_accuracy.py` measures 87-91% — so
+    /// this deliberately does not report through the ordinary hit counters. A
+    /// speculative read that turns out useful shows up as a hit when the real
+    /// acquire runs; one that does not shows up here.
+    public func prefetch(layer: Int, experts: [Int]) {
+        let acquisition = acquireAsync(layer: layer, experts: experts,
+                                       speculative: true)
+        pendingLock.lock()
+        // One outstanding speculation per layer. A second would need the first
+        // to have settled, and nothing issues two.
+        pending[layer] = acquisition
+        pendingLock.unlock()
+    }
+
+    /// Waits for any speculative read on `layer` to finish.
+    ///
+    /// Normally free: the speculation was issued before attention and the reads
+    /// have had that long to land.
+    public func settlePrefetch(layer: Int) throws {
+        pendingLock.lock()
+        let outstanding = pending.removeValue(forKey: layer)
+        pendingLock.unlock()
+        try outstanding?.wait()
+    }
+
+    public func acquireAsync(layer: Int, experts: [Int],
+                             speculative: Bool = false) -> Acquisition {
         lock.lock()
         let plan = planners[layer].plan(experts: experts)
         lock.unlock()
 
-        stats.hits += plan.hitCount
-        stats.misses += plan.missCount
+        if speculative {
+            stats.speculativeReads += plan.missCount
+            stats.speculativeBytes += stride * plan.missCount
+        } else {
+            stats.hits += plan.hitCount
+            stats.misses += plan.missCount
+        }
         stats.bytesRead += stride * plan.missCount
 
         let group = DispatchGroup()

@@ -989,6 +989,7 @@ case "serve":
                 serveSettings.seed = value
             }
         case "--greedy": serveSettings = .greedy
+        case "--lookahead": setenv("GODWIT_LOOKAHEAD", "1", 1)
         default:
             FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))
             exit(2)
@@ -1026,6 +1027,7 @@ case "chat":
             chatSettings.repetitionPenalty = chatFlags.next().flatMap(Float.init) ?? 1.0
         case "--seed": chatSettings.seed = chatFlags.next().flatMap(UInt64.init) ?? 0
         case "--greedy": chatSettings = .greedy
+        case "--lookahead": setenv("GODWIT_LOOKAHEAD", "1", 1)
         case "--show-analysis": showAnalysis = true
         default:
             FileHandle.standardError.write(Data("unknown flag: \(flag)\n".utf8))

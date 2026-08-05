@@ -237,8 +237,35 @@ running on hardware where compute is the larger share. A wrong prediction also
 costs a wasted read, at 0.8 of 8 experts for Qwen3, unless the speculative
 fetch is cancelled once the true routing is known.
 
-Not implemented. Unlike the two entries under *what did not work*, this one is
-worth building.
+### Implemented, and worth less than the accuracy suggests
+
+`godwit chat --lookahead`. Off by default.
+
+Interleaved A/B on Qwen3, 9 pairs, nothing else touching the disk:
+
+| | mean | sd | range |
+| --- | ---: | ---: | ---: |
+| off | 2.222 tok/s | 0.079 | 2.09–2.38 |
+| on | 2.292 tok/s | 0.049 | 2.21–2.41 |
+
+**+3.1%, faster in 9 of 9 pairs, sign test p = 0.002.** Real, consistent, and
+far below the ~1.2x this section estimated. It also halves the spread, which is
+worth as much as the mean: the slow runs are the ones it rescues.
+
+The reported cache hit rate jumps from 45% to 89.6% with it on, and that number
+is a trap. Speculation does not avoid a read, it *moves* it earlier, so an
+expert fetched on a guess counts as a hit when the real routing arrives. Bytes
+off disk barely change. Only wall clock is evidence here.
+
+The gap between 3.1% and the estimate is the settle: the real acquire must wait
+for any speculative read still in flight, or a real read lands under a
+speculative one in the same slot. So the win is only what actually overlapped
+during attention, and attention is a small share of the 17.6% the GPU is busy
+at all.
+
+Decode only. In prefill the union of every token's experts routinely exceeds
+the eight slots, so speculating there evicts faster than it reads — the first
+implementation hung on exactly that.
 
 ### A note on how this was measured
 

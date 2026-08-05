@@ -181,7 +181,13 @@ Try the pipeline without the full transfer by installing a single layer:
 | `trace-layers`, `trace-routing` | Measure routing behaviour |
 
 `chat` and `serve` accept `--temperature`, `--top-k`, `--top-p`,
-`--repetition-penalty`, `--seed`, `--greedy` and `--slots`.
+`--repetition-penalty`, `--seed`, `--greedy`, `--slots` and `--lookahead`.
+
+`--lookahead` runs each layer's router on the residual entering it, before
+attention, and starts reading the experts it predicts — 87–91% of them
+correctly. Measured at **+3.1%** over 9 interleaved pairs (p = 0.002), which is
+small because the read still has to happen; it just starts earlier. Off by
+default.
 
 ## How it works
 

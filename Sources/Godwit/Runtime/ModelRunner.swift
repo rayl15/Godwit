@@ -20,8 +20,15 @@ public struct ModelRunner {
         self.spec = reader.manifest.spec
         let rope = RoPE(configuration: .forSpec(reader.manifest.spec))
         self.rope = rope
+        // Off by default: measured at +3.1% on this hardware, which is real
+        // but small enough that it should be asked for. `--lookahead`, or
+        // GODWIT_LOOKAHEAD=1 for scripts.
+        let speculate = ProcessInfo.processInfo.environment["GODWIT_LOOKAHEAD"] == "1"
         self.layers = (0..<reader.manifest.layerCount).map {
-            TransformerLayer(context: context, reader: reader, index: $0, rope: rope)
+            var layer = TransformerLayer(context: context, reader: reader,
+                                         index: $0, rope: rope)
+            layer.lookahead = speculate
+            return layer
         }
     }
 
