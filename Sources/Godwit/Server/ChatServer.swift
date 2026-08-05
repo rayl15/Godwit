@@ -69,7 +69,7 @@ public final class ChatServer {
         }
 
         try server.start()
-        print("godwit dashboard on http://127.0.0.1:\(port)")
+        print("Godwit dashboard on http://127.0.0.1:\(port)")
         print("model \(reader.manifest.model), \(expertCache.slotCount) expert slots")
         server.run()
     }

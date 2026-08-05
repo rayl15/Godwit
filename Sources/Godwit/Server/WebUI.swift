@@ -14,7 +14,7 @@ enum WebUI {
         <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>godwit</title>
+        <title>Godwit</title>
         <style>
         :root {
           --bg: #0b0c0e; --panel: #131519; --line: #23262c;
@@ -115,7 +115,7 @@ enum WebUI {
         </head>
         <body>
         <aside>
-          <div class="brand"><h1>godwit</h1><span>MAX RANGE, MIN PAYLOAD</span></div>
+          <div class="brand"><h1>Godwit</h1><span>MAX RANGE, MIN PAYLOAD</span></div>
 
           <section>
             <h2>Model</h2>

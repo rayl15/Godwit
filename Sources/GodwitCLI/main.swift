@@ -1007,7 +1007,7 @@ case let other?:
     exit(1)
 case nil:
     print("""
-    godwit — streaming mixture-of-experts inference for memory-constrained machines
+    Godwit — streaming mixture-of-experts inference for memory-constrained machines
 
     usage: godwit <command>
 
