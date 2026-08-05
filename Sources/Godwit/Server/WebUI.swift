@@ -137,6 +137,28 @@ enum WebUI {
         #sky { width: 100%; height: min(66vh, 660px); display: block; cursor: grab;
                background: #06090d; border: 1px solid var(--line); }
         #sky:active { cursor: grabbing; }
+        .sky-wrap { position: relative; }
+        /* Sits over the canvas, so it can hold a button. */
+        #range-empty {
+          position: absolute; inset: 0; display: none;
+          flex-direction: column; align-items: center; justify-content: center;
+          gap: 12px; text-align: center; padding: 24px;
+        }
+        #range-empty b { font-size: 15px; }
+        #range-empty p { color: var(--dim); font-size: 12px; max-width: 46ch;
+                         line-height: 1.55; margin: 0; }
+        #range-empty code { color: var(--faint); font-size: 11px; }
+        #range-empty button {
+          background: var(--accent); color: #04252b; border: none;
+          font: inherit; font-size: 12px; font-weight: 600;
+          padding: 8px 16px; cursor: pointer;
+        }
+        #range-empty button:disabled { background: var(--accent-dim);
+                                       color: var(--dim); cursor: wait; }
+        #range-progress { display: none; align-items: center; gap: 10px;
+                          font-size: 11px; color: var(--dim); }
+        #range-progress .bar { width: 160px; height: 3px; background: var(--line); }
+        #range-progress .bar div { height: 100%; background: var(--accent); width: 0 }
         #range-legend { flex-wrap: wrap; gap: 10px 16px; }
         #range-legend span { display: flex; align-items: center; gap: 5px; }
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -226,7 +248,10 @@ enum WebUI {
 
           <div class="view" id="v-range">
             <div class="legend" id="range-legend"></div>
-            <canvas id="sky"></canvas>
+            <div class="sky-wrap">
+              <canvas id="sky"></canvas>
+              <div id="range-empty"></div>
+            </div>
             <div class="axis">
               <span id="range-note">loading…</span>
               <span>drag to spin · scroll to zoom</span>
@@ -408,6 +433,67 @@ enum WebUI {
                    depth: depth, z: z };
         }
 
+        // Shown over the canvas when the loaded model has no range map.
+        function showRangeEmpty(state) {
+          const box = $('range-empty');
+          box.style.display = 'flex';
+          if (state === 'building') return;
+          box.innerHTML =
+            '<b>No range map for this model.</b>'
+            + '<p>It is measured rather than shipped. Probing the router with '
+            + 'twenty-four samples takes a few minutes, and the model cannot '
+            + 'answer while it runs — there is one GPU queue and one set of '
+            + 'expert slots.</p>'
+            + '<button id="build-range">Build range map</button>'
+            + '<div id="range-progress"><div class="bar"><div></div></div>'
+            + '<span></span></div>'
+            + '<code>or: godwit range --model ' + missingDir
+            + ' -o ' + missingDir + '/range.json</code>';
+          $('build-range').onclick = buildRange;
+        }
+
+        function buildRange() {
+          const box = $('range-empty');
+          const button = $('build-range');
+          const progress = $('range-progress');
+          const fill = progress.querySelector('.bar div');
+          const label = progress.querySelector('span');
+          button.disabled = true;
+          button.textContent = 'Probing…';
+          progress.style.display = 'flex';
+          $('status').textContent = 'probing';
+
+          const source = new EventSource('/api/range/build');
+          source.addEventListener('progress', e => {
+            const d = JSON.parse(e.data);
+            fill.style.width = (d.done / Math.max(d.total, 1) * 100) + '%';
+            label.textContent = d.done + '/' + d.total + '  ' + d.topic;
+          });
+          source.addEventListener('done', e => {
+            source.close();
+            $('status').textContent = 'idle';
+            // The map is on disk now, so the ordinary load path can have it.
+            fetch('/api/range').then(r => r.json()).then(data => {
+              box.style.display = 'none';
+              missingDir = null;
+              adoptRangeMap(data);
+            });
+          });
+          source.addEventListener('error', e => {
+            source.close();
+            $('status').textContent = 'idle';
+            button.disabled = false;
+            button.textContent = 'Build range map';
+            label.textContent = (JSON.parse(e.data || '{}').message) || 'failed';
+          });
+          source.onerror = () => {
+            source.close();
+            $('status').textContent = 'idle';
+            button.disabled = false;
+            button.textContent = 'Build range map';
+          };
+        }
+
         function drawRange() {
           if (!rangeMap && !missingDir) return;
           const dpr = window.devicePixelRatio || 1;
@@ -417,25 +503,10 @@ enum WebUI {
           g.scale(dpr, dpr);
           g.fillStyle = '#06090d'; g.fillRect(0, 0, w, h);
 
-          // A blank canvas under a one-line footnote reads as broken. Say what
-          // is missing where the eye already is, and how to produce it.
-          if (!rangeMap) {
-            g.textAlign = 'center';
-            g.fillStyle = '#7d8b9a';
-            g.font = '600 15px ui-monospace, SFMono-Regular, Menlo, monospace';
-            g.fillText('No range map for this model.', w / 2, h / 2 - 30);
-            g.fillStyle = '#5f6c7a';
-            g.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-            g.fillText('It is measured rather than shipped. Probe the router to build one:',
-                       w / 2, h / 2);
-            g.fillStyle = '#22d3ee';
-            g.fillText('godwit range --model ' + missingDir + ' -o ' + missingDir
-                       + '/range.json', w / 2, h / 2 + 26);
-            g.fillStyle = '#5f6c7a';
-            g.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
-            g.fillText('A few minutes. Reload when it finishes.', w / 2, h / 2 + 52);
-            return;
-          }
+          // The empty state is DOM rather than canvas: it carries a button, and
+          // a canvas cannot. It also cannot be drawn into a zero-sized canvas
+          // by accident, which the drawn version had to be careful about.
+          if (!rangeMap) { showRangeEmpty(); return; }
 
           // Far points first so near ones sit on top.
           const drawn = rangeMap.points.map(p => ({ p: p, v: project(p, w, h) }))
@@ -512,14 +583,10 @@ enum WebUI {
         });
         sky.addEventListener('mouseleave', () => tip.style.display = 'none');
 
-        fetch('/api/range').then(r => r.ok ? r.json() : null).then(data => {
-          const note = document.getElementById('range-note');
-          if (!data || !data.points || !data.points.length) {
-            note.textContent = 'no range map for this model';
-            missingDir = picker.dataset.current || '<dir>';
-            drawRange();       // sizes the canvas itself
-            return;
-          }
+        // Adopting a map is shared between the page load and the build button,
+        // so a freshly probed map renders exactly like a loaded one.
+        function adoptRangeMap(data) {
+          const note = $('range-note');
           rangeMap = data;
           let cx = 0, cy = 0, cz = 0;
           for (const p of data.points) { cx += p.x; cy += p.y; cz += p.z; }
@@ -533,22 +600,33 @@ enum WebUI {
           }
           rangeMap.spread = spread || 1;
 
-          const legend = document.getElementById('range-legend');
+          const legend = $('range-legend');
+          legend.innerHTML = '';
           for (const topic of data.topics) {
             // Counts are of experts that cleared the activation bar. This is
             // the number the legend used to overstate.
-            const n = data.points.filter(p => p.topic === topic
+            const count = data.points.filter(p => p.topic === topic
                                               && p.confident !== false
                                               && p.specialisation > 0.35).length;
             const el = document.createElement('span');
             el.innerHTML = '<i class="dot" style="background:'
-              + (TOPIC_COLOURS[topic] || '#64748b') + '"></i>' + topic + ' ' + n;
+              + (TOPIC_COLOURS[topic] || '#64748b') + '"></i>' + topic + ' ' + count;
             legend.appendChild(el);
           }
           const v = data.variance || [];
           note.textContent = data.points.length + ' experts · axes explain '
             + v.map(x => (x * 100).toFixed(0) + '%').join(' / ') + ' of variance';
           drawRange();
+        }
+
+        fetch('/api/range').then(r => r.ok ? r.json() : null).then(data => {
+          if (!data || !data.points || !data.points.length) {
+            $('range-note').textContent = 'no range map for this model';
+            missingDir = picker.dataset.current || '<dir>';
+            showRangeEmpty();
+            return;
+          }
+          adoptRangeMap(data);
         });
         window.addEventListener('resize', drawRange);
 

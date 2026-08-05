@@ -36,6 +36,9 @@ public final class ChatServer {
     private var loaded: Loaded?
     /// Set while an install is running, so a second one is refused.
     private var installing: String?
+    /// Set while a range probe is running. It holds the same lock generation
+    /// does, so a second one would deadlock rather than queue.
+    private var probing = false
 
     public init(root: URL, initial: URL? = nil, slots: Int = 8,
                 settings: Sampler.Settings = Sampler.Settings(),
@@ -87,6 +90,8 @@ public final class ChatServer {
                     return .json("{\"error\":\"missing id\"}")
                 }
                 return .stream { stream in self.install(id: id, to: stream) }
+            case "/api/range/build":
+                return .stream { stream in self.buildRange(to: stream) }
             case "/api/range":
                 guard let loaded = self.loaded,
                       let data = try? Data(contentsOf:
@@ -182,6 +187,44 @@ public final class ChatServer {
             return
         }
         stream.send(event: "done", json: "{\"name\":\(Self.quoted("\(name).gwt"))}")
+    }
+
+    /// Probes the router and writes a range map for the loaded model.
+    ///
+    /// Runs on the request thread while holding the turn lock, because it uses
+    /// the same runner and expert slots a chat turn does. That makes the
+    /// dashboard unresponsive to generation for a few minutes, which is
+    /// honest: there is one GPU queue and one set of slots, and pretending
+    /// otherwise would mean two models' worth of experts in 16 GB.
+    private func buildRange(to stream: HTTPServer.EventStream) {
+        turnLock.lock()
+        if probing {
+            turnLock.unlock()
+            stream.send(event: "error", json: "{\"message\":\"already probing\"}")
+            return
+        }
+        guard let loaded else {
+            turnLock.unlock()
+            stream.send(event: "error", json: "{\"message\":\"no model loaded\"}")
+            return
+        }
+        probing = true
+        defer { probing = false; turnLock.unlock() }
+
+        do {
+            let probe = ExpertRange(context: context, reader: loaded.reader)
+            let map = try probe.build(slots: slots) { topic, done, total in
+                stream.send(event: "progress", json:
+                    "{\"topic\":\(Self.quoted(topic)),\"done\":\(done),"
+                    + "\"total\":\(total)}")
+            }
+            let data = try JSONEncoder().encode(map)
+            try data.write(to: loaded.directory.appendingPathComponent("range.json"))
+            stream.send(event: "done", json: "{\"experts\":\(map.points.count)}")
+        } catch {
+            stream.send(event: "error",
+                        json: "{\"message\":\(Self.quoted("\(error)"))}")
+        }
     }
 
     private static func quoted(_ text: String) -> String {

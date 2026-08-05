@@ -142,8 +142,8 @@ swift build -c release
 .build/release/godwit serve --model model.gwt
 ```
 
-Build the range map (a few minutes — 3m44s for Qwen3's 48 layers; the
-dashboard picks it up automatically):
+Build the range map. The dashboard offers a button when the loaded model has
+none; from the command line (a few minutes — 3m44s for Qwen3's 48 layers):
 
 ```bash
 .build/release/godwit range --model model.gwt -o model.gwt/range.json
