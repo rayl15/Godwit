@@ -252,7 +252,40 @@ godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 | Resident | 5.7 GiB | 4.1 GiB |
 | Decode | 1.4 tok/s | **2.8–3.2 tok/s** |
 
-Qwen3-30B-A3B installs at 17.5 GB and activates 3.3B parameters per token.
+### Qwen3-30B-A3B: runs, but degraded
+
+| | GPT-OSS-120B | Qwen3-30B-A3B |
+| --- | ---: | ---: |
+| Install | 59 GB | 16 GB |
+| Install time | ~3 h | 105 min |
+| Decode | 1.4 tok/s | 2.4 tok/s |
+| Time to first token | 10–13 s | 4.5 s |
+| Expert cache hit | ~60% | 45% |
+
+The engine is right and the output is not good enough to use. Both halves of
+that matter.
+
+Right: the installed weights sit 18.5 dB from the checkpoint at every depth,
+which is exactly what MXFP4 costs and no more, and a control comparing against
+swapped gate/up ordering collapses to -3.0 dB, so the layout is correct rather
+than coincidentally plausible. It emits fluent English, correct ChatML, and the
+right facts — asked for the capital of France it says Paris.
+
+Not good enough: it then cannot stop. It restates the answer and re-checks it
+until the token budget runs out, with reasoning enabled or disabled, greedy or
+with Qwen3's own recommended sampling. It knows the answer and will not commit
+to it.
+
+The likely cause is quantisation. GPT-OSS ships already on the MXFP4 grid and
+loses nothing; Qwen3 ships BF16, and putting it there costs 18.9 dB and about
+12% error on every expert's output. **This has not been proved** — the decisive
+test is comparing our logits against a NumPy reference built from the same
+installed bytes, as `check-layer` does for GPT-OSS, and that reference does not
+exist for Qwen3 yet. Until it does, a subtle bug in QK-norm or RoPE cannot be
+ruled out, though neither would usually leave grammar and facts intact.
+
+If quantisation is the cause, int8 experts would fix it at 45.3 dB and a 30.4 GB
+install.
 
 The 20B ran first time with no change beyond declaring the spec, which was a
 real but narrow result: same family, so tensor naming, RoPE, activation, sinks

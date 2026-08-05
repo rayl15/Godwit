@@ -310,6 +310,22 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
             let parts = Conversation.split(reply)
             conversation.append(Conversation.Message(.assistant, parts.final))
 
+            // A turn can spend its whole budget reasoning and never reach an
+            // answer — Qwen3 does this readily, and GPT-OSS on open questions.
+            // Printing nothing at all is indistinguishable from a crash, so say
+            // what happened and show the reasoning that was produced.
+            if parts.final.isEmpty, !showAnalysis {
+                let stopped = produced.count >= count
+                FileHandle.standardError.write(Data(
+                    (stopped
+                     ? "\n[stopped at the \(count)-token limit while still "
+                       + "reasoning, before reaching an answer]\n"
+                     : "\n[ended without reaching an answer]\n").utf8))
+                if let analysis = parts.analysis, !analysis.isEmpty {
+                    print(analysis)
+                }
+            }
+
             print()
             FileHandle.standardError.write(Data(String(
                 format: "\n[%d prompt tokens %.1fs · %d generated %.2f tok/s]\n\n",
