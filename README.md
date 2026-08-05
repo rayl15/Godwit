@@ -7,6 +7,7 @@
 [![platform](https://img.shields.io/badge/platform-Apple%20Silicon-8b8783?style=flat-square&labelColor=2b2622)](#requirements)
 [![model](https://img.shields.io/badge/model-GPT--OSS--120B-6b4526?style=flat-square&labelColor=2b2622)](https://huggingface.co/openai/gpt-oss-120b)
 [![dependencies](https://img.shields.io/badge/dependencies-none-6dc46d?style=flat-square&labelColor=2b2622)](Package.swift)
+[![website](https://img.shields.io/badge/website-rayl15.github.io%2FGodwit-2b2622?style=flat-square&labelColor=2b2622)](https://rayl15.github.io/Godwit/)
 
 **Run a 120-billion-parameter model on a 16 GB laptop.**
 

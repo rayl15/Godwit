@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Godwit — run a 120B model on a 16 GB laptop</title>
+<meta name="description" content="Godwit runs GPT-OSS-120B on an Apple Silicon Mac with 16 GB of memory by streaming mixture-of-experts weights from SSD. Swift and Metal, no dependencies.">
+<meta property="og:title" content="Godwit — max range, min payload">
+<meta property="og:description" content="A 120-billion-parameter model on a 16 GB laptop. Swift + Metal, no dependencies.">
+<meta property="og:image" content="https://rayl15.github.io/Godwit/assets/range.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230b0c0e'/><rect x='3' y='7' width='8' height='4' fill='%23d98b4a'/><rect x='9' y='4' width='2' height='3' fill='%23e8a768'/><rect x='11' y='2' width='2' height='2' fill='%238b8783'/></svg>">
+<style>
+:root{--bg:#0b0c0e;--panel:#131519;--line:#23262c;--text:#e8e6e3;--dim:#8b8783;
+      --faint:#55524f;--accent:#d98b4a;--accent-dim:#6b4526;--good:#6dc46d}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);
+     font:15px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+
+nav{position:sticky;top:0;z-index:20;background:rgba(11,12,14,.92);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:22px;height:56px}
+nav b{color:var(--accent);font-size:17px;margin-right:auto}
+nav a{color:var(--dim);font-size:13px}
+nav a:hover{color:var(--text);text-decoration:none}
+nav a.gh{color:var(--accent)}
+
+header{padding:76px 0 60px;text-align:center;border-bottom:1px solid var(--line)}
+header img.banner{width:min(660px,100%);margin-bottom:26px}
+h1{font-size:clamp(22px,3.4vw,34px);line-height:1.3;margin:0 0 18px;font-weight:600}
+h1 em{font-style:normal;color:var(--accent)}
+.lede{color:var(--dim);max-width:660px;margin:0 auto 28px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{border:1px solid var(--accent-dim);background:#1a1512;color:var(--text);
+     padding:9px 20px;font:inherit;font-size:14px}
+.btn:hover{background:#22190f;text-decoration:none}
+.btn.ghost{background:none;border-color:var(--line);color:var(--dim)}
+
+section{padding:64px 0;border-bottom:1px solid var(--line)}
+h2{font-size:13px;letter-spacing:1.6px;text-transform:uppercase;color:var(--faint);
+   font-weight:500;margin:0 0 8px}
+h3{font-size:22px;margin:0 0 18px;font-weight:600}
+p{max-width:720px;color:var(--dim)}
+p strong{color:var(--text);font-weight:600}
+
+.grid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);margin:26px 0}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.cell{background:var(--panel);padding:18px 20px}
+.cell b{display:block;font-size:26px;color:var(--accent);font-weight:600}
+.cell i{font-style:normal;font-size:11px;color:var(--faint);letter-spacing:.8px;
+        text-transform:uppercase}
+.cell p{font-size:13px;margin:8px 0 0;color:var(--dim)}
+
+figure{margin:26px 0}
+figure img{width:100%;border:1px solid var(--line);display:block}
+figcaption{color:var(--faint);font-size:13px;margin-top:10px}
+
+table{border-collapse:collapse;width:100%;margin:22px 0;font-size:14px}
+th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line)}
+th{color:var(--faint);font-weight:500;font-size:11px;letter-spacing:1px;
+   text-transform:uppercase}
+td.n{text-align:right;color:var(--accent)}
+td.no{text-align:right;color:var(--dim)}
+
+pre{background:var(--panel);border:1px solid var(--line);padding:16px 18px;
+    overflow-x:auto;font-size:13.5px;line-height:1.7}
+code{color:var(--accent)}
+pre code{color:var(--text)}
+pre .c{color:var(--faint)}
+
+#sky{width:100%;height:min(62vh,560px);display:block;background:#08090b;
+     border:1px solid var(--line);cursor:grab}
+#sky:active{cursor:grabbing}
+.legend{display:flex;flex-wrap:wrap;gap:9px 16px;margin:14px 0 0;
+        font-size:12px;color:var(--dim)}
+.legend span{display:flex;align-items:center;gap:5px}
+.dot{width:8px;height:8px;border-radius:50%}
+
+.note{border-left:2px solid var(--accent-dim);padding:2px 0 2px 16px;margin:22px 0}
+.note p{color:var(--dim);font-size:14px}
+
+footer{padding:48px 0 64px;color:var(--faint);font-size:13px}
+footer a{color:var(--dim)}
+.fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:28px;
+       margin-bottom:34px}
+.fgrid h4{color:var(--faint);font-size:11px;letter-spacing:1px;text-transform:uppercase;
+          margin:0 0 10px;font-weight:500}
+.fgrid a{display:block;padding:3px 0}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <b>Godwit</b>
+  <a href="#engine">Engine</a>
+  <a href="#views">Views</a>
+  <a href="#range">Range</a>
+  <a href="#numbers">Numbers</a>
+  <a href="#limits">Limits</a>
+  <a class="gh" href="https://github.com/rayl15/Godwit">GitHub →</a>
+</div></nav>
+
+<header><div class="wrap">
+  <img class="banner" src="assets/banner.svg" alt="Godwit — max range, min payload">
+  <h1>This model does not fit in your laptop.<br>It runs on it <em>anyway</em>.</h1>
+  <p class="lede">GPT-OSS-120B is 59 GiB on disk. Godwit runs it on an Apple Silicon
+  Mac with 16 GB of memory by keeping only the shared trunk resident and streaming
+  mixture-of-experts weights from SSD as the router asks for them. Swift and Metal,
+  no dependencies.</p>
+  <div class="cta">
+    <a class="btn" href="https://github.com/rayl15/Godwit">Get it on GitHub</a>
+    <a class="btn ghost" href="#numbers">See the numbers</a>
+  </div>
+</div></header>
+
+<section id="engine"><div class="wrap">
+  <h2>Engine</h2>
+  <h3>Only 3% of the model matters at a time</h3>
+  <p>GPT-OSS-120B has 128 experts in each of its 36 layers. For any given token the
+  router picks <strong>four</strong> of them. The other 124 contribute nothing to
+  that token and need not be in memory.</p>
+  <p>Every mainstream runtime still requires the whole checkpoint resident, so disk
+  footprint sets the memory requirement and a 59 GiB model needs a 64 GiB machine.
+  Godwit keeps the trunk — embeddings, attention, routers, norms — in 2.12 GiB, and
+  fetches experts as they are chosen.</p>
+
+  <div class="grid g3">
+    <div class="cell"><b>2.12</b><i>GiB trunk, resident</i>
+      <p>Embeddings, attention, routers and norms, quantised to int8.</p></div>
+    <div class="cell"><b>3.56</b><i>GiB expert cache</i>
+      <p>Eight slots per layer, evicted least-frequently-used.</p></div>
+    <div class="cell"><b>59</b><i>GiB streamed from SSD</i>
+      <p>4,608 experts at 12.6 MiB each, read on demand.</p></div>
+  </div>
+
+  <p>The cost is throughput. You are trading tokens per second for the ability to
+  run the model at all, and on a base MacBook Air that buys about 1.4 tokens per
+  second. The bet is that slow beats impossible.</p>
+</div></section>
+
+<section id="views"><div class="wrap">
+  <h2>Views</h2>
+  <h3>Watch it think</h3>
+  <p><code>godwit serve</code> opens a dashboard on loopback. No npm, no build step —
+  the binary serves the whole interface.</p>
+
+  <figure>
+    <img src="assets/chat.png" alt="Godwit chat view">
+    <figcaption>Chat, with live tokens per second, time to first token, cache hit
+    rate and bytes read this turn. The model's reasoning channel is folded away
+    beneath its answer.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="assets/experts.png" alt="Live expert routing grid">
+    <figcaption>Every one of the model's 4,608 experts — 36 layers across, 128 down —
+    lighting up as the router selects them. Exactly 144 cells fire for any single
+    token. The near-uniform speckle is a finding, not noise: routing is not
+    predictable across layers, which is why prefetching does not work.</figcaption>
+  </figure>
+</div></section>
+
+<section id="range"><div class="wrap">
+  <h2>Range map</h2>
+  <h3>What each expert is actually for</h3>
+  <p>A range map is the ornithologist's chart of where a species is found. This is
+  the same idea over topic space. Godwit probes the router with twelve kinds of
+  text and records which experts fire for each; position comes from the principal
+  components of those affinity vectors. <strong>Nothing here is trained</strong> —
+  it is measurement.</p>
+
+  <canvas id="sky"></canvas>
+  <div class="legend" id="legend"></div>
+  <p style="font-size:13px;margin-top:14px" id="meta">loading…</p>
+
+  <div class="note"><p><strong>Read this before believing the counts.</strong>
+  73% of the experts labelled <code>python</code> fired fewer than twenty times
+  across the probes. An expert that fires twice, both times on Python, scores as a
+  pure specialist when it is merely under-sampled. Roughly 150 of the 545 have
+  enough activations to be defensible. More probe samples would fix it and has not
+  been done.</p></div>
+</div></section>
+
+<section id="numbers"><div class="wrap">
+  <h2>Numbers</h2>
+  <h3>Measured on a 13″ M4 MacBook Air, 16 GB, base 256 GB SSD</h3>
+
+  <table>
+    <tr><th>Metric</th><th style="text-align:right">Value</th></tr>
+    <tr><td>Decode</td><td class="n">1.4–1.5 tok/s</td></tr>
+    <tr><td>Prefill</td><td class="n">~2.2 tok/s</td></tr>
+    <tr><td>Time to first token</td><td class="n">10–13 s</td></tr>
+    <tr><td>Resident memory</td><td class="n">5.7 GiB</td></tr>
+    <tr><td>GPU busy</td><td class="no">17.6% of wall time</td></tr>
+    <tr><td>Expert reads</td><td class="no">71.6% of decode</td></tr>
+  </table>
+
+  <p><strong>That is device speed, not an inefficiency.</strong> The read path
+  already runs at what this SSD delivers. Small Apple SSDs use fewer NAND dies and
+  are genuinely slower — this one reads ~2 GiB/s, where 512 GB–2 TB modules reach
+  3–6. The same code should reach roughly 3–5 tok/s on a Mac with a larger SSD.
+  That has not been verified, because no such machine was available.</p>
+
+  <h3 style="margin-top:44px">Things that did not work</h3>
+  <p>Recorded because they cost as much to establish as the wins.</p>
+  <table>
+    <tr><th>Attempt</th><th>Result</th></tr>
+    <tr><td>Cross-layer prefetch</td><td class="no">4.8% hit vs 3.1% chance</td></tr>
+    <tr><td>Concurrent miss reads</td><td class="no">no effect</td></tr>
+    <tr><td>Splitting reads into chunks</td><td class="no">slightly worse</td></tr>
+    <tr><td>More cache slots (24)</td><td class="no">swaps; 0.12 tok/s</td></tr>
+    <tr><td>Threadgroup-memory staging</td><td class="no">no effect</td></tr>
+    <tr><td>File defragmentation</td><td class="no">no effect</td></tr>
+  </table>
+</div></section>
+
+<section id="limits"><div class="wrap">
+  <h2>Limits</h2>
+  <h3>What this is not</h3>
+  <p>It is <strong>slow</strong>. 1.4 tokens per second is roughly 100 words a
+  minute — slower than you read. Good for long-form generation you can walk away
+  from; poor for conversation.</p>
+  <p>GPT-OSS-<strong>20B</strong> fits in the same 16 GB and runs at 30–50 tok/s
+  under MLX. For most tasks it is good enough, and if that is true for yours you
+  should use it instead. Godwit matters where the larger model's quality is worth
+  the wait, or where even 20B will not fit.</p>
+  <p>One model family so far. About 78% of the Swift is model-agnostic and reads
+  its dimensions from a spec; the rest is tensor naming, YaRN-only RoPE, and the
+  assumption of MXFP4 experts. Adding a second family should mean writing a loader
+  rather than a runtime — untested until someone does it.</p>
+
+  <h3 style="margin-top:44px">Install</h3>
+<pre><code><span class="c"># Apple Silicon, macOS 26+, Swift 6.2+, ~60 GB free</span>
+git clone https://github.com/rayl15/Godwit.git
+cd Godwit
+swift build -c release
+
+<span class="c"># Stream and repack the checkpoint. ~59 GiB, about 3 hours.</span>
+.build/release/godwit install --output model.gwt
+
+.build/release/godwit chat  --model model.gwt   <span class="c"># terminal</span>
+.build/release/godwit serve --model model.gwt   <span class="c"># dashboard</span></code></pre>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="fgrid">
+    <div><h4>Engine</h4>
+      <a href="https://github.com/rayl15/Godwit/blob/main/docs/DESIGN.md">Design notes</a>
+      <a href="https://github.com/rayl15/Godwit/blob/main/docs/RESULTS.md">Measured results</a>
+      <a href="https://github.com/rayl15/Godwit/blob/main/docs/ESTIMATE.md">Feasibility estimate</a>
+    </div>
+    <div><h4>Project</h4>
+      <a href="https://github.com/rayl15/Godwit">Source</a>
+      <a href="https://github.com/rayl15/Godwit/issues">Issues</a>
+      <a href="https://github.com/rayl15/Godwit/blob/main/CONTRIBUTING.md">Contributing</a>
+    </div>
+    <div><h4>Prior art</h4>
+      <a href="https://github.com/drumih/turbo-fieldfare">TurboFieldfare</a>
+      <a href="https://github.com/JustVugg/colibri">colibrì</a>
+      <a href="https://huggingface.co/openai/gpt-oss-120b">GPT-OSS-120B</a>
+    </div>
+  </div>
+  <p style="max-width:720px">Apache 2.0. Model weights are not included and remain
+  governed by their own terms. Godwit is an independent, clean-room implementation;
+  it is not affiliated with OpenAI.</p>
+</div></footer>
+
+<script>
+const COLOURS={python:'#4a9eda',sql:'#5ec8c8',math:'#d98b4a',poetry:'#d95a9e',
+  legal:'#b07fd9',medical:'#6dc46d',chinese:'#e05c5c',japanese:'#e8a13c',
+  russian:'#8fa8d9',json:'#c8c85e',chat:'#9b9b9b',history:'#c07a4a'};
+let R=null,spin={x:-.28,y:.7},zoom=1.7,drag=null;
+const sky=document.getElementById('sky');
+
+function project(p,w,h){
+  const cy=Math.cos(spin.y),sy=Math.sin(spin.y),cx=Math.cos(spin.x),sx=Math.sin(spin.x);
+  const px=p.x-R.c.x,py=p.y-R.c.y,pz=p.z-R.c.z;
+  let x=px*cy-pz*sy, z=px*sy+pz*cy, y=py*cx-z*sx; z=py*sx+z*cx;
+  const s=Math.min(w,h)*0.40*zoom/R.spread, d=1/(1+z*0.35/R.spread);
+  return{sx:w/2+x*s*d,sy:h/2+y*s*d,d:d,z:z};
+}
+function draw(){
+  if(!R)return;
+  const dpr=devicePixelRatio||1,w=sky.clientWidth,h=sky.clientHeight;
+  sky.width=w*dpr; sky.height=h*dpr;
+  const g=sky.getContext('2d'); g.scale(dpr,dpr);
+  g.fillStyle='#08090b'; g.fillRect(0,0,w,h);
+  const pts=R.points.map(p=>({p,v:project(p,w,h)})).sort((a,b)=>b.v.z-a.v.z);
+  for(const d of pts){
+    g.globalAlpha=.25+d.p.s*.75;
+    g.fillStyle=COLOURS[R.topics[d.p.t]]||'#777';
+    g.beginPath(); g.arc(d.v.sx,d.v.sy,Math.max(.5,(0.7+d.p.s*2.6)*d.v.d*zoom),0,6.2832); g.fill();
+  }
+  g.globalAlpha=1; g.font='11px ui-monospace,Menlo,monospace';
+  R.topics.forEach((topic,i)=>{
+    const m=R.points.filter(p=>p.t===i&&p.s>.45);
+    if(m.length<12)return;
+    let cx=0,cy=0,cz=0; for(const q of m){cx+=q.x;cy+=q.y;cz+=q.z;}
+    const v=project({x:cx/m.length,y:cy/m.length,z:cz/m.length},w,h);
+    const tw=g.measureText(topic).width;
+    g.fillStyle='rgba(8,9,11,.82)'; g.fillRect(v.sx+4,v.sy-14,tw+6,15);
+    g.fillStyle=COLOURS[topic]||'#aaa'; g.fillText(topic,v.sx+7,v.sy-3);
+    g.beginPath(); g.arc(v.sx,v.sy,2.5,0,6.2832); g.fill();
+  });
+}
+sky.addEventListener('mousedown',e=>drag={x:e.clientX,y:e.clientY,sx:spin.x,sy:spin.y});
+addEventListener('mouseup',()=>drag=null);
+addEventListener('mousemove',e=>{
+  if(!drag)return;
+  spin.y=drag.sy+(e.clientX-drag.x)*.006; spin.x=drag.sx+(e.clientY-drag.y)*.006; draw();
+});
+sky.addEventListener('wheel',e=>{
+  e.preventDefault(); zoom=Math.max(.4,Math.min(6,zoom*(e.deltaY>0?.92:1.08))); draw();
+},{passive:false});
+addEventListener('resize',draw);
+
+fetch('range.json').then(r=>r.json()).then(d=>{
+  R=d;
+  let cx=0,cy=0,cz=0; for(const p of d.points){cx+=p.x;cy+=p.y;cz+=p.z;}
+  const n=d.points.length; R.c={x:cx/n,y:cy/n,z:cz/n};
+  let s=0; for(const p of d.points)
+    s=Math.max(s,Math.abs(p.x-R.c.x),Math.abs(p.y-R.c.y),Math.abs(p.z-R.c.z));
+  R.spread=s||1;
+  const lg=document.getElementById('legend');
+  d.topics.forEach((t,i)=>{
+    const c=d.points.filter(p=>p.t===i&&p.s>.35).length;
+    const el=document.createElement('span');
+    el.innerHTML='<i class="dot" style="background:'+(COLOURS[t]||'#777')+'"></i>'+t+' '+c;
+    lg.appendChild(el);
+  });
+  document.getElementById('meta').textContent=
+    n.toLocaleString()+' experts · axes explain '+
+    d.variance.map(v=>(v*100).toFixed(0)+'%').join(' / ')+
+    ' of variance · drag to spin, scroll to zoom';
+  draw();
+});
+</script>
+</body>
+</html>
