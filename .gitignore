@@ -1,13 +1,51 @@
+# Swift Package Manager and Xcode
 .build/
 .swiftpm/
+Package.resolved
+DerivedData/
+xcuserdata/
+*.dSYM
+
+# Installed models and anything derived from them.
+#
+# A .gwt directory is 11-59 GiB, produced by `godwit install`, and never checked
+# in. `scratch/` is where this repo happens to keep them; the pattern below
+# covers them wherever a contributor puts theirs.
 scratch/
 *.gwt/
-.DS_Store
-Package.resolved
+
+# Reference tensors written by the check-* commands and their Python
+# counterparts. Regenerated on demand and specific to one install.
+ref-*/
 
 # Copied from docs/assets at publish time; see .github/workflows/pages.yml
 site/assets/
 
-# Python bytecode from the analysis scripts
+# Python, for the analysis scripts under Scripts/analysis
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+**/.DS_Store
+._*
+
+# Local environment and secrets. Nothing here needs credentials, but a
+# contributor's Hugging Face token would otherwise be one `git add -A` away.
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and profiling output
+*.log
+*.trace
+*.gputrace
