@@ -16,7 +16,20 @@ public final class ModelReader {
 
     public init(directory: URL) throws {
         self.directory = directory
-        let data = try Data(contentsOf: directory.appendingPathComponent("manifest.json"))
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        // Checked before reading so a mistyped path produces a sentence rather
+        // than an NSCocoaErrorDomain dump. This is most people's first command,
+        // and the raw error buries the one fact that matters.
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            let exists = FileManager.default.fileExists(atPath: directory.path)
+            throw ModelReaderError.notAnInstall(
+                exists
+                ? "\(directory.path) has no manifest.json — not a .gwt install, "
+                  + "or an install that did not finish"
+                : "no such directory: \(directory.path). Run `godwit install "
+                  + "--output <dir>` first, or pass --model <dir>")
+        }
+        let data = try Data(contentsOf: manifestURL)
         self.manifest = try JSONDecoder().decode(GodwitManifest.self, from: data)
         guard manifest.formatVersion == GodwitManifest.currentFormatVersion else {
             throw InstallError.verificationFailed(
@@ -156,5 +169,14 @@ extension ModelReader {
             throw ExpertBlobError.missingSection(name)
         }
         return section.shape
+    }
+}
+
+/// Problems with the install directory itself, kept separate from install-time
+/// verification so the message a first-time user sees is one sentence.
+public enum ModelReaderError: Error, CustomStringConvertible {
+    case notAnInstall(String)
+    public var description: String {
+        switch self { case .notAnInstall(let detail): return detail }
     }
 }

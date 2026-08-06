@@ -1105,6 +1105,10 @@ case nil:
       logits           run the full model and show next-token candidates
       generate         greedily generate tokens from a prompt
       tokenize         encode and decode text with the model's tokeniser
+      check-mxfp4      re-encode installed MXFP4 and demand byte equality
+      dump-routing     write every routing decision, with weights, as JSON
+      dump-hidden      write the residual entering each layer, for analysis
+      ab-kernel        A/B two kernels with thermal drift controlled
       trace-routing    measure router skew from embeddings (superseded)
       trace-layers     run real layers and test whether routing is predictable
     """)
