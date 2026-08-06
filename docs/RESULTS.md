@@ -83,6 +83,7 @@ Recorded because they cost as much to find out as the wins.
 | --- | --- |
 | Prefetch by reusing the previous layer's expert IDs | 4.8% hit against 3.1% for chance. This rules out *that* method, not prefetching — see Routing |
 | Serving low-weight experts at lower precision | Costs more accuracy than it saves bytes — see Precision by router rank |
+| Pre-warming the cache from the range map | Real signal, no benefit — the cache finds the same experts in two tokens |
 | Concurrent miss reads | No effect; one and eight threads both reach ~2 GiB/s |
 | Splitting each read into chunks | Slightly *worse* (1.54 → 1.46 tok/s) |
 | More cache slots | Hit rate rises, throughput does not; 24 slots swaps and collapses to 0.12 tok/s |
@@ -278,3 +279,56 @@ The script now reproduces the engine's own selection from the true router input
 before it measures anything, and aborts below 99%. That check caught the int8
 error, and then caught a second one: GPT-OSS's router carries a bias that Qwen3's
 does not, worth 10 points of agreement on its own.
+
+## Pre-warming the cache from the range map
+
+`Scripts/analysis/topic_prior.py` and `prewarm_sim.py`.
+
+Cache-aware routing ([arXiv:2412.00099](https://arxiv.org/html/2412.00099v2)
+and others) raises hit rate by biasing selection toward resident experts. It
+works, and it changes which experts run, so it buys speed with output quality.
+
+The range map suggested something better: if it can predict which experts a
+generation will use, the cache could be seeded from the prompt's topic —
+changing only what is resident, never what runs, leaving output bit-identical.
+
+**The prediction is real.** Weighted by how often each expert fires, against
+three topically distinct generations on Qwen3:
+
+| generation | own-topic experts | enrichment |
+| --- | ---: | ---: |
+| Python | 31.1% of fires vs 15.6% of map | **2.00x** |
+| Chinese | 41.3% vs 7.4% | **5.61x** |
+| Maths | 38.6% vs 13.0% | **2.98x** |
+
+Off-topic experts are suppressed in step — `medical` at 0.20x during Python,
+`sql` at 0.11x during maths. Two things fell out that were not asked for:
+Chinese text pulls `japanese` experts at 3.98x, so the map has captured
+something real about CJK, and `chat` experts are enriched in all three traces,
+which is what a general-purpose expert should look like.
+
+**The benefit is nil anyway.** Simulated against the real policy — per-layer,
+8 slots, LFU with LRU tie-break:
+
+| decisions | baseline | pre-warmed | gain |
+| ---: | ---: | ---: | ---: |
+| 48 (one token) | 0.0% | 9.4% | +9.4% |
+| 96 | 14.1% | 18.8% | +4.7% |
+| 240 | 25.5% | 27.3% | +1.9% |
+| 960 | 19.6% | 20.0% | +0.5% |
+| 1488 | 20.8% | 21.1% | +0.3% |
+
+Pre-warming is a cold-start optimisation, and the cold start is two tokens
+long. LFU with LRU finds the same experts unaided almost immediately, after
+which the seed is just history. The ceiling is structural regardless of how
+good the prior gets: 384 seeded slots against 11,904 expert accesses caps the
+saving at 3.2% even if every guess were right and never re-read.
+
+Not implemented. The measurement is kept because the enrichment numbers are
+worth having on their own — they are the first direct evidence that the range
+map predicts behaviour rather than merely describing it.
+
+One caveat on the baseline: these simulations run from `dump-routing`, which
+records only the last token's decision per step, so they miss the expert reuse
+within a prefill batch. That is why the hit rates here sit near 20% while real
+generation measures 38-45%. The comparison between columns is unaffected.
