@@ -332,3 +332,54 @@ One caveat on the baseline: these simulations run from `dump-routing`, which
 records only the last token's decision per step, so they miss the expert reuse
 within a prefill batch. That is why the hit rates here sit near 20% while real
 generation measures 38-45%. The comparison between columns is unaffected.
+
+## What quantisation costs Qwen3
+
+`Scripts/analysis/quantisation_cost.py`.
+
+GPT-OSS ships on the MXFP4 grid, so the installer copies its experts through
+and quantisation costs it nothing. Qwen3 ships BF16 and we quantise it
+ourselves, which makes it the one that can be damaged — and until now the repo
+knew only that it cost 18.5 dB in weight space and that the model produced
+coherent text. That is not the same as knowing what it costs the computation.
+
+Measured in output space, on real inputs: for a routing decision taken from an
+actual generation, the mixture-of-experts block is computed twice from the same
+vector — once with the weights on disk, once with the original BF16 fetched
+from the checkpoint. Same routing, same arithmetic, same input; only the
+weights differ.
+
+| layer | block error | cosine | vs residual | next-layer routing |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 5.6% | 0.9987 | 4.80% | 8/8 identical |
+| 12 | 15.1% | 0.9886 | 2.70% | 8/8 identical |
+| 24 | 12.4% | 0.9923 | 4.99% | 8/8 identical |
+| 36 | 14.6% | 0.9893 | 6.77% | 8/8 identical |
+| 47 | 9.3% | 0.9974 | 5.95% | last layer |
+
+Three things follow.
+
+**The direction survives; the magnitude moves.** Cosine similarity stays above
+0.988 throughout, so the block computes very nearly the same vector, slightly
+scaled. A norm downstream absorbs most of what remains.
+
+**The block's error is not the model's error.** 11.4% on the block's own output
+is 2.7-6.8% of the residual stream it is added to, because the residual carries
+everything computed so far.
+
+**Routing does not change, which is the one that matters.** Expert selection is
+a discrete decision, and a flip would compound: a different expert produces a
+different output, which perturbs the next router further. Across every layer
+tested the perturbed residual selects the same eight experts. The error sits
+well inside the margin separating the eighth expert from the ninth.
+
+One consistent bias worth recording: the quantised block is *smaller* than the
+reference at every layer sampled, never larger — 62.078 against 66.114 at layer
+47. MXFP4 rounding here is biased slightly toward zero rather than being
+symmetric noise.
+
+**Limits of this measurement.** Five layers, one token position each, one
+prompt. It shows routing is stable at those points, not that it is stable
+everywhere; a longer generation or an adversarial prompt could find a decision
+sitting near the boundary. It also stops short of end-to-end token agreement,
+which would need the full model at BF16 and does not fit on this machine.
