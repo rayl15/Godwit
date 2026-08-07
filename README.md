@@ -290,6 +290,16 @@ GPT-OSS-20B ran first time with no change beyond declaring the spec, which was a
 narrow result — same family, so tensor naming, RoPE, activation, sinks and
 tokeniser were never exercised.
 
+**Quantisation does not appear to hurt Qwen3 much**, which was worth checking
+rather than assuming — it is the only model here we quantise ourselves, since
+GPT-OSS already ships on the MXFP4 grid. Recomputing the expert block from the
+original BF16 weights and comparing against the weights on disk gives 11.4%
+error on the block's own output, but only 2.7–6.8% of the residual stream it
+feeds, with cosine similarity above 0.988. The result that matters is that the
+next layer selects **the same eight experts every time** — expert selection is
+discrete, and a flip is what would compound. Method and limits in
+[docs/RESULTS.md](docs/RESULTS.md).
+
 Qwen3 was the actual test. It took one bug worth recording, because of how it presented. The
 model produced fluent English with correct facts and then could not stop —
 asked for the capital of France it would say Paris, doubt itself, and re-derive
