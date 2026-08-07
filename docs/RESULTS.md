@@ -375,11 +375,49 @@ well inside the margin separating the eighth expert from the ninth.
 
 One consistent bias worth recording: the quantised block is *smaller* than the
 reference at every layer sampled, never larger — 62.078 against 66.114 at layer
-47. MXFP4 rounding here is biased slightly toward zero rather than being
-symmetric noise.
+47. It is real, it is not the encoder, and it is not worth correcting; chased
+below.
 
 **Limits of this measurement.** Five layers, one token position each, one
 prompt. It shows routing is stable at those points, not that it is stable
 everywhere; a longer generation or an adversarial prompt could find a decision
 sitting near the boundary. It also stops short of end-to-end token agreement,
 which would need the full model at BF16 and does not fit on this machine.
+
+## The MXFP4 shrinkage, chased and dropped
+
+`Scripts/analysis/mxfp4_bias.py`.
+
+The section above noticed the quantised expert block coming out smaller than
+the BF16 reference at every layer sampled, and guessed at the mechanism: MXFP4's
+magnitudes are 0, 0.5, 1, 1.5, 2, 3, 4, 6, so anything below a quarter of the
+block scale rounds to zero, and weights are Gaussian enough that most of a block
+sits down there. Delete the small values and the norm shrinks. A systematic bias
+is usually fixable, and a fix would have bought accuracy for nothing.
+
+Both halves of that were wrong.
+
+**The encoder is not biased.** On real Qwen3 experts, `||quantised|| / ||original||`
+is 1.0000 to 1.0002 — L2 preserved to four decimals. Rounding to zero does happen,
+about 11% of weights, but those weights carry roughly 1% of the magnitude. It
+shows up in L1 (0.991) and is invisible in L2.
+
+**The output shrinks anyway.** Across 41 real inputs through one expert at layer
+47, `||quantised|| / ||reference||` averages 0.939 and is below 1.0 in 34 of 41
+cases. So the shrinkage is real and arises in the computation rather than in the
+stored weights.
+
+**And correcting it is worth almost nothing:**
+
+| | error |
+| --- | ---: |
+| as-is | 24.3% |
+| one fixed scalar, k = 1.065 | 24.1% |
+| perfect per-output rescale | 22.9% |
+
+That last row is the floor — what a perfect, unobtainable oracle rescaling every
+output individually would achieve. Magnitude is 6% of the error and direction is
+the other 94%, and no rescaling touches direction.
+
+Not implemented. Recorded because "the output is systematically small, so scale
+it up" is an obvious idea and the arithmetic showing it fails is short.
