@@ -421,3 +421,48 @@ the other 94%, and no rescaling touches direction.
 
 Not implemented. Recorded because "the output is systematically small, so scale
 it up" is an obvious idea and the arithmetic showing it fails is short.
+
+## Prefill and where time to first token goes
+
+Decode has had all the attention. Prefill was never examined, and it owns the
+most user-visible number in the project: 10-13 seconds before the first token
+appears.
+
+Measured on Qwen3 by varying prompt length:
+
+| prompt tokens | prefill | tok/s | experts read | GiB |
+| ---: | ---: | ---: | ---: | ---: |
+| 15 | 4.85 s | 3.1 | 2,429 | 5.74 |
+| 22 | 5.77 s | 3.8 | — | — |
+| 36 | 7.05 s | 5.1 | 3,006 | 7.11 |
+| 64 | 8.40 s | 7.6 | — | — |
+| 120 | 9.92 s | 12.1 | 3,367 | 7.96 |
+
+**Prefill is already efficient.** Eight times the tokens costs 2.07x the time,
+and 1.39x the reads. The expert-major ordering is doing its job: each unique
+expert in a layer is fetched once however many tokens selected it, so the union
+saturates — about 51 experts per layer at 15 tokens, 70 at 120, out of 128.
+Throughput rises from 3.1 to 12.1 tok/s as the fixed cost is spread wider.
+
+**Time to first token is a fixed cost, not a per-token one.** A 15-token prompt
+reads 5.74 GiB before producing anything, because it still has to touch roughly
+half of every layer's experts. At this SSD's ~2 GiB/s that is about 2.9 s of
+unavoidable I/O inside a 4.85 s prefill. Short prompts are therefore the worst
+case per token, and there is nothing to optimise: the reads are already
+deduplicated and the model genuinely needs those weights.
+
+Nothing changed as a result. This is recorded because "prefill is slow, someone
+should look at it" is a reasonable assumption that turns out to be wrong, and
+the shape of the curve — sublinear in tokens, saturating in reads — is the
+evidence.
+
+### A reporting fix that came with it
+
+`expertCache.resetStats()` ran before decode, so prefill's reads were discarded
+and every cache figure this project has published described decode only. On a
+short generation prefill is the larger share of the I/O. Prefill statistics are
+now reported separately, and the decode line is labelled as such.
+
+The hit rate during prefill is 0% by construction: the cache starts cold and
+each expert is read once. Whether a second conversational turn hits warm has
+not been measured.
