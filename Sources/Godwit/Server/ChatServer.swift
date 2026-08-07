@@ -15,14 +15,18 @@ public final class ChatServer {
         let tokenizer: Tokenizer
         let weights: ModelRunner.Weights
         let expertCache: ExpertCache
+        let session: ChatSession
 
-        init(directory: URL, context: MetalContext, slots: Int) throws {
+        init(directory: URL, context: MetalContext, slots: Int,
+             system: String, maxTokens: Int) throws {
             self.directory = directory
             self.reader = try ModelReader(directory: directory)
             self.tokenizer = try reader.loadTokenizer()
             self.runner = ModelRunner(context: context, reader: reader)
             self.weights = try runner.loadWeights()
             self.expertCache = try runner.makeExpertCache(slots: slots)
+            self.session = ChatSession(runner: runner, tokenizer: tokenizer,
+                                       system: system, reserve: maxTokens)
         }
     }
 
@@ -51,7 +55,9 @@ public final class ChatServer {
         self.system = system
         self.slots = slots
         if let initial {
-            self.loaded = try Loaded(directory: initial, context: context, slots: slots)
+            self.loaded = try Loaded(directory: initial, context: context,
+                                     slots: slots, system: system,
+                                     maxTokens: maxTokens)
         }
     }
 
@@ -63,7 +69,8 @@ public final class ChatServer {
         turnLock.lock()
         defer { turnLock.unlock() }
         loaded = nil
-        loaded = try Loaded(directory: directory, context: context, slots: slots)
+        loaded = try Loaded(directory: directory, context: context, slots: slots,
+                            system: system, maxTokens: maxTokens)
     }
 
     public func listen(port: UInt16) throws {
@@ -98,6 +105,11 @@ public final class ChatServer {
                         loaded.directory.appendingPathComponent("range.json"))
                 else { return .json("{\"points\":[]}") }
                 return .ok(contentType: "application/json", body: data)
+            case "/api/chat/reset":
+                self.turnLock.lock()
+                self.loaded?.session.reset()
+                self.turnLock.unlock()
+                return .json("{\"ok\":true}")
             case "/api/chat":
                 guard let question = request.query["q"], !question.isEmpty else {
                     return .json("{\"error\":\"missing q\"}")
@@ -257,12 +269,12 @@ public final class ChatServer {
         let weights = loaded.weights, expertCache = loaded.expertCache
 
         do {
-            var conversation = Conversation(system: system)
-            conversation.append(Conversation.Message(.user, question))
-            let ids = try conversation.encode(with: tokenizer)
             let stops = Conversation.stopTokens(tokenizer)
-
-            let cache = try runner.makeCache(maxContext: ids.count + maxTokens + 16)
+            // The session holds the conversation and its KV cache, so a
+            // follow-up prefills only its own new tokens instead of the whole
+            // history. On the first turn this is identical to starting cold.
+            let turn = try loaded.session.begin(question: question)
+            let cache = turn.cache
             var sampler = Sampler(settings: settings)
             expertCache.resetStats()
 
@@ -270,7 +282,8 @@ public final class ChatServer {
 
             let started = Date()
             var logits = try runner.logits(
-                tokens: ids, positionBase: 0, cache: cache, weights: weights,
+                tokens: turn.tokens, positionBase: turn.positionBase,
+                cache: cache, weights: weights,
                 expertCache: expertCache,
                 routing: { layer, decisions in
                     // The last token's choices are the interesting ones — the
@@ -280,8 +293,9 @@ public final class ChatServer {
                                 json: "{\"layer\":\(layer),\"experts\":\(last.experts)}")
                 })
             let ttft = Date().timeIntervalSince(started)
-            stream.send(event: "stats",
-                        json: "{\"stage\":\"decode\",\"ttft\":\(ttft)}")
+            stream.send(event: "stats", json:
+                "{\"stage\":\"decode\",\"ttft\":\(ttft),"
+                + "\"prompt\":\(turn.promptCount),\"reused\":\(turn.reused)}")
 
             var produced: [Int] = []
             var lastAnalysis = -1
@@ -293,6 +307,7 @@ public final class ChatServer {
                 let next = sampler.pick(from: logits, history: produced)
                 if stops.contains(next) { stopped = true; break }
                 produced.append(next)
+                loaded.session.record(next)
 
                 let full = tokenizer.decode(produced)
                 let parts = Conversation.split(full)
@@ -330,7 +345,9 @@ public final class ChatServer {
             // A turn can spend its whole budget in the analysis channel and
             // never reach an answer — GPT-OSS does this on open-ended questions.
             // Unless the client is told, the reply is just an empty box.
-            let answered = !Conversation.split(tokenizer.decode(produced)).final.isEmpty
+            let reply = Conversation.split(tokenizer.decode(produced)).final
+            loaded.session.finish(reply: reply)
+            let answered = !reply.isEmpty
             stream.send(event: "done", json:
                 "{\"truncated\":\(!stopped),\"answered\":\(answered),"
                 + "\"limit\":\(maxTokens)}")
