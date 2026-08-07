@@ -69,6 +69,18 @@ public final class KVCache {
         length = 0
     }
 
+    /// Drops everything after `position`, keeping the prefix valid.
+    ///
+    /// Entries past the new length are left in place and simply overwritten by
+    /// the next write; nothing reads beyond `length`. Sliding layers hold a
+    /// ring, so shrinking is safe for the same reason — the slots a shortened
+    /// prefix maps to are exactly the ones it wrote.
+    public func truncate(to position: Int) {
+        precondition(position >= 0 && position <= length,
+                     "truncate(to: \(position)) outside 0...\(length)")
+        length = position
+    }
+
     /// Appends a run of K/V for one layer at absolute `position`.
     ///
     /// Encodes into a caller-supplied command buffer so the write joins the

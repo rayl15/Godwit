@@ -109,7 +109,7 @@ base 256 GB SSD:
 | --- | ---: |
 | Decode | 1.4–1.5 tok/s, flat across the generation |
 | Prefill | ~2.2 tok/s |
-| Time to first token | 10–13 s |
+| Time to first token | 10–13 s first turn, ~4 s after |
 | Resident | 2.12 GiB trunk + 3.56 GiB expert slots |
 | GPU busy | 17.6% of wall time |
 
@@ -280,9 +280,15 @@ godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 | Time to first token | 10–13 s | ~5 s | 4.5 s |
 | Expert cache hit | ~38% | ~60% | ~32% |
 
-Cache hit rates are for a short single turn and rise as a conversation grows;
-Qwen3's is structurally lower because it routes to eight experts per token
-against GPT-OSS's four, touching twice as many through the same eight slots.
+Time to first token is the first turn. Later turns reuse the cached prefix and
+flatten at about 4.3 s however long the conversation gets — 2.7x faster by the
+sixth turn, and it stops growing rather than growing more slowly.
+
+Cache hit rates are for a short single turn and rise over a generation as the
+cache warms. They do not carry across turns: prefill touches 50–70 experts per
+layer through 8 slots, so it evicts everything it loads. Qwen3's is structurally
+lower because it routes to eight experts per token against GPT-OSS's four,
+touching twice as many through the same eight slots.
 
 ### What a second family cost
 
