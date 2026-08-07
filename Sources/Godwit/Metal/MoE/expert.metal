@@ -424,3 +424,34 @@ kernel void qk_head_rmsnorm(
         row[i] = half(float(row[i]) * inverse * float(weight[i]));
     }
 }
+
+// GeGLU with the tanh approximation to GELU: gelu(gate) * up.
+//
+// What `hidden_activation: "gelu_pytorch_tanh"` means, and what the Gemma
+// family computes. Distinct from SwiGLU in the gate only — the exact GELU uses
+// erf, and this uses the tanh series that PyTorch and JAX ship, which differ by
+// enough to matter when it feeds a residual thirty times.
+//
+// Kept as its own kernel rather than a branch: this used to route to the SwiGLU
+// kernel, which ran without complaint and computed the wrong function. That is
+// the same failure as the missing attention biases and the half/bfloat QK-norm
+// weight, and it is the third time in this project a wrong-but-plausible
+// default has cost real time.
+kernel void expert_activation_geglu(
+    device const float *gate_up [[buffer(0)]],   // 2 * F, interleaved
+    device half        *out     [[buffer(1)]],   // F
+    constant uint      &width   [[buffer(2)]],   // F
+    uint                index   [[thread_position_in_grid]])
+{
+    if (index >= width) { return; }
+
+    const float gate = gate_up[index * 2u];
+    const float up   = gate_up[index * 2u + 1u];
+
+    // 0.5x(1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))
+    const float k = 0.7978845608028654f;         // sqrt(2/pi)
+    const float inner = k * (gate + 0.044715f * gate * gate * gate);
+    const float gelu = 0.5f * gate * (1.0f + tanh(inner));
+
+    out[index] = half(gelu * up);
+}

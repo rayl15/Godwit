@@ -12,7 +12,7 @@ public enum AttentionKind: String, Codable, Sendable {
 ///
 /// Model families disagree here and it is cheap to parameterise: Gemma uses
 /// tanh-approximated GELU, most others use SiLU.
-public enum FeedForwardActivation: String, Codable, Sendable {
+public enum FeedForwardActivation: String, Codable, Sendable, CaseIterable {
     case silu
     case geluTanh
     /// GPT-OSS's expert gate: `(up + 1) * gate * sigmoid(alpha * gate)`, with
@@ -22,6 +22,20 @@ public enum FeedForwardActivation: String, Codable, Sendable {
     /// which is not what the experts actually compute. The `+1` shift and the
     /// asymmetric clamp are both load-bearing.
     case gptOssClampedGLU
+
+    /// The Metal kernel that computes this activation.
+    ///
+    /// Lives here rather than in the runtime so that adding a case forces an
+    /// answer at the point of declaration. `geluTanh` was previously declared
+    /// with no kernel of its own and quietly routed to SwiGLU, which runs and
+    /// computes the wrong function.
+    public var kernel: String {
+        switch self {
+        case .gptOssClampedGLU: return "gptoss_expert_activation"
+        case .silu: return "expert_activation_swiglu"
+        case .geluTanh: return "expert_activation_geglu"
+        }
+    }
 }
 
 /// One transformer layer's shape.
