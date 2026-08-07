@@ -247,6 +247,15 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
 
         var conversation = Conversation(system: system)
         let interactive = prompt == nil
+
+        // The KV cache outlives a turn so the next one can reuse its prefix,
+        // and `cached` records exactly which tokens produced it — prompt plus
+        // everything sampled. Comparing against that rather than against the
+        // conversation is what makes the reuse safe: the two diverge, because
+        // an assistant turn is re-encoded from its answer channel alone and
+        // wrapped in template markup that was never generated.
+        var cache: KVCache?
+        var cached: [Int] = []
         if interactive {
             FileHandle.standardError.write(Data(
                 "ready. blank line or /exit to quit, /reset to clear history.\n\n".utf8))
@@ -262,6 +271,8 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
                 if line == "/exit" { break }
                 if line == "/reset" {
                     conversation.reset()
+                    cache?.reset()
+                    cached = []
                     FileHandle.standardError.write(Data("history cleared\n\n".utf8))
                     continue
                 }
@@ -271,16 +282,48 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
             conversation.append(Conversation.Message(.user, question))
             let ids = try conversation.encode(with: tokenizer)
 
-            // Each turn re-encodes the whole conversation, so the cache is
-            // rebuilt from scratch. Reusing it across turns needs prefix
-            // matching, which is the obvious next step.
-            let cache = try runner.makeCache(maxContext: ids.count + count + 16)
+            // Grown in steps rather than to fit, so a conversation is not
+            // reallocated — and its prefix lost — on every turn.
+            let needed = ids.count + count + 16
+            if cache == nil || cache!.maxContext < needed {
+                cache = try runner.makeCache(
+                    maxContext: max(needed, 2 * (cache?.maxContext ?? 0), 2048))
+                cached = []
+            }
+            let cache = cache!
+
+            // How much of this turn the cache already holds. Capped one short
+            // of the prompt so there is always a token left to run: the logits
+            // come from the last position, and a prefill of nothing produces
+            // none.
+            // An escape hatch, because reuse is the kind of optimisation that
+            // fails silently: a stale prefix still produces fluent text. This
+            // is how the two paths were shown to agree token for token.
+            var reused = 0
+            if ProcessInfo.processInfo.environment["GODWIT_NO_PREFIX_REUSE"] != nil {
+                cached = []
+            }
+            while reused < min(cached.count, ids.count - 1),
+                  cached[reused] == ids[reused] { reused += 1 }
+            cache.truncate(to: reused)
+            let fresh = Array(ids[reused...])
+            cached = ids
+
             var sampler = Sampler(settings: settings)
 
+            // Per turn, so the warming of the expert cache across a
+            // conversation is visible rather than averaged away.
+            expertCache.resetStats()
             let prefillStart = Date()
-            var logits = try runner.logits(tokens: ids, positionBase: 0, cache: cache,
-                                           weights: weights, expertCache: expertCache)
+            var logits = try runner.logits(tokens: fresh, positionBase: reused,
+                                           cache: cache, weights: weights,
+                                           expertCache: expertCache)
             let prefill = Date().timeIntervalSince(prefillStart)
+            let prefillStats = expertCache.stats
+            FileHandle.standardError.write(Data(String(
+                format: "  [prefill %d of %d tok (%d reused), %.2fs, %.2f GiB]\n",
+                fresh.count, ids.count, reused, prefill,
+                Double(prefillStats.bytesRead) / 1_073_741_824).utf8))
 
             var produced: [Int] = []
             var emitted = ""
@@ -289,6 +332,7 @@ func runChat(model: String, prompt: String?, system: String, count: Int,
                 let next = sampler.pick(from: logits, history: produced)
                 if stops.contains(next) { break }
                 produced.append(next)
+                cached.append(next)
 
                 // Decode the whole run each time: a multi-byte character can
                 // span tokens, so decoding one at a time would print mojibake.

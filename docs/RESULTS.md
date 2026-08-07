@@ -451,10 +451,11 @@ unavoidable I/O inside a 4.85 s prefill. Short prompts are therefore the worst
 case per token, and there is nothing to optimise: the reads are already
 deduplicated and the model genuinely needs those weights.
 
-Nothing changed as a result. This is recorded because "prefill is slow, someone
-should look at it" is a reasonable assumption that turns out to be wrong, and
-the shape of the curve — sublinear in tokens, saturating in reads — is the
-evidence.
+Nothing changed as a result *for a single prompt*. This is recorded because
+"prefill is slow, someone should look at it" is a reasonable assumption that
+turns out to be wrong, and the shape of the curve — sublinear in tokens,
+saturating in reads — is the evidence. The saving was in the second turn, not
+the first; see below.
 
 ### A reporting fix that came with it
 
@@ -464,5 +465,74 @@ short generation prefill is the larger share of the I/O. Prefill statistics are
 now reported separately, and the decode line is labelled as such.
 
 The hit rate during prefill is 0% by construction: the cache starts cold and
-each expert is read once. Whether a second conversational turn hits warm has
-not been measured.
+each expert is read once. Whether a second conversational turn hits warm is
+measured next.
+
+## Multi-turn chat: the expert cache does not warm, the KV cache does
+
+Two things could make a second conversational turn cheaper than the first. Only
+one of them works, and it is not the one that looked promising.
+
+### The expert cache stays cold — a negative result
+
+`expertCache` is created once and outlives every turn, so a conversation ought
+to warm it. Measured across four turns, per-turn statistics:
+
+| turn | prompt tokens | prefill | GiB read | cached |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 32 | 7.21 s | 7.45 | 0% |
+| 2 | 48 | 8.67 s | 8.19 | 0% |
+| 3 | 65 | 9.84 s | 8.74 | 0% |
+| 4 | 82 | 10.57 s | 9.08 | 0% |
+
+Exactly 0%, every turn. The cause is capacity, not routing. Prefill touches
+50-70 experts per layer against 8 resident slots, so a single turn cycles the
+whole working set through the cache several times over and evicts everything it
+loaded. Nothing can survive to the next turn. Holding a prefill working set
+would need roughly 8 GiB resident, which is the entire problem this project
+exists to avoid.
+
+This is worth stating plainly because the intuition — "long conversation, warm
+cache, faster" — is wrong here, and wrong for a structural reason rather than a
+tuning one.
+
+### Reusing the KV cache prefix — 2.7x by turn six
+
+The same table shows the real problem. Chat re-encodes the whole conversation
+every turn and prefilled it from scratch, so time to first token grew with the
+conversation without bound. Turn four spent 10.57 s re-deriving 82 tokens of
+which only ~17 were new.
+
+The KV cache now persists across turns. Each turn compares the new prompt
+against the tokens the cache was actually built from, keeps the matching
+prefix, and prefills only the remainder. Six turns, same conversation, same
+seed:
+
+| turn | prompt tokens | rebuilt each turn | prefix reused | speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 26 | 6.35 s | 6.20 s | — |
+| 2 | 41 | 7.84 s | 4.31 s | 1.8x |
+| 3 | 57 | 9.03 s | 4.55 s | 2.0x |
+| 4 | 73 | 10.09 s | 4.35 s | 2.3x |
+| 5 | 88 | 10.77 s | 4.24 s | 2.5x |
+| 6 | 102 | 11.12 s | 4.08 s | 2.7x |
+
+**Time to first token stops growing.** It flattens at about 4.3 s regardless of
+conversation length, because each turn prefills only its own new tokens — 14 to
+16 here — instead of the whole history. The advantage compounds: turn 6 is 2.7x
+faster and turn 20 would be the same 4.3 s while the old path kept climbing.
+Across the six turns, 27.7 s of prefill instead of 55.2 s.
+
+The comparison must be exact, because a stale prefix produces fluent text
+rather than an error — the failure mode would be silent. Both paths were run
+over the same conversation at temperature 0 and the generated text is byte
+identical (1,034 bytes). `GODWIT_NO_PREFIX_REUSE=1` keeps the old path
+available for exactly this check.
+
+The subtlety worth recording: the reusable prefix cannot be taken as "the
+cached length". An assistant turn is re-encoded from its answer channel alone
+and wrapped in template markup that was never generated, so the tokens in the
+cache and the tokens in the next prompt diverge partway through. Matching on
+the token sequence the cache was actually built from handles that, and handles
+`/reset`, edited history and topic changes as the same case. `KVCache.truncate`
+rewinds to the match; entries past it are overwritten by the next write.
