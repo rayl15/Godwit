@@ -161,6 +161,17 @@ func runGenerate(model: String, tokens: [Int], count: Int, stop: Set<Int> = [],
             format: "prefill %d tokens in %.2fs (%.1f tok/s)\n",
             tokens.count, prefill, Double(tokens.count) / prefill).utf8))
 
+        // Prefill's reads used to be discarded here, so every cache figure this
+        // tool has ever printed described decode only. For a short generation
+        // prefill is the larger share of the I/O — a 15-token prompt touches
+        // most of each layer's experts before a single token is produced.
+        let prefillStats = expertCache.stats
+        FileHandle.standardError.write(Data(String(
+            format: "  prefill reads: %d experts, %.2f GiB (%.1f%% of them cached)\n",
+            prefillStats.hits + prefillStats.misses,
+            Double(prefillStats.bytesRead) / 1_073_741_824,
+            prefillStats.hitRate * 100).utf8))
+
         // Decode: one token at a time against the cache.
         expertCache.resetStats()
         profiler?.reset()
