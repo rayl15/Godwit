@@ -280,6 +280,9 @@ godwit install --output qwen3.gwt --model-id Qwen/Qwen3-30B-A3B
 | Time to first token | 10–13 s | ~5 s | 4.5 s |
 | Expert cache hit | ~38% | ~60% | ~32% |
 
+The dashboard holds a conversation: follow-ups resolve against what was already
+said, and New clears both the transcript and the cache behind it.
+
 Time to first token is the first turn. Later turns reuse the cached prefix and
 flatten at about 4.3 s however long the conversation gets — 2.7x faster by the
 sixth turn, and it stops growing rather than growing more slowly.

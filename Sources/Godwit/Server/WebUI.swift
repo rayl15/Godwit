@@ -89,6 +89,8 @@ enum WebUI {
           padding: 0 18px; cursor: pointer; font: inherit;
         }
         button.send:disabled { opacity: .35; cursor: default; }
+        button.send.ghost { background: none; border: 1px solid var(--line);
+                            color: var(--dim); }
         /* The grid needs an explicit height: 128 rows of 1fr inside an
            auto-height column collapse to nothing. */
         #grid { display: grid; gap: 1px; grid-template-columns: repeat(%LAYERS%, 1fr);
@@ -262,6 +264,8 @@ enum WebUI {
             <div class="composer">
               <textarea id="input" placeholder="Ask something…"></textarea>
               <button class="send" id="send">Send</button>
+              <button class="send ghost" id="new-chat"
+                      title="Clear the conversation">New</button>
             </div>
           </footer>
         </main>
@@ -320,6 +324,18 @@ enum WebUI {
           return wrap;
         }
 
+        // Clearing is a server-side operation: the session holds the KV cache
+        // the conversation warmed, and dropping only the transcript would leave
+        // the model still answering in the old context.
+        $('new-chat').onclick = async () => {
+          if (busy) return;
+          await fetch('/api/chat/reset');
+          $('v-chat').innerHTML = '';
+          $('s-ttft').parentNode.title = '';
+          $('status').textContent = 'idle';
+          $('input').focus();
+        };
+
         let busy = false;
         async function ask() {
           const text = $('input').value.trim();
@@ -353,7 +369,15 @@ enum WebUI {
             const d = JSON.parse(e.data);
             $('status').textContent = d.stage;
             if (d.rate !== undefined) $('s-rate').textContent = d.rate.toFixed(2);
-            if (d.ttft !== undefined) $('s-ttft').textContent = d.ttft.toFixed(1) + 's';
+            if (d.ttft !== undefined) {
+              $('s-ttft').textContent = d.ttft.toFixed(1) + 's';
+              // A follow-up prefills only its own new tokens, so say so —
+              // otherwise a suddenly faster turn just looks like noise.
+              $('s-ttft').parentNode.title = d.reused
+                ? 'prefilled ' + (d.prompt - d.reused) + ' of ' + d.prompt
+                  + ' tokens · ' + d.reused + ' reused from the conversation'
+                : 'prefilled all ' + (d.prompt || 0) + ' prompt tokens';
+            }
             if (d.tokens !== undefined) $('s-tokens').textContent = d.tokens;
             if (d.hit !== undefined) $('s-hit').textContent = (d.hit * 100).toFixed(0) + '%';
             if (d.read !== undefined) $('s-read').textContent = d.read.toFixed(2) + ' GiB';

@@ -529,6 +529,34 @@ over the same conversation at temperature 0 and the generated text is byte
 identical (1,034 bytes). `GODWIT_NO_PREFIX_REUSE=1` keeps the old path
 available for exactly this check.
 
+### The dashboard had no conversation at all
+
+Measuring the above turned up a plainer bug. `/api/chat` took a single `q=`
+parameter and built a fresh `Conversation` per request, so the dashboard — the
+interface in every screenshot — could not hold a conversation. Every question
+started cold and follow-ups were impossible: "what river runs through it?" had
+no "it".
+
+Both paths now drive one `ChatSession`, which owns the conversation, its KV
+cache and the token sequence that cache was built from. The dashboard gained
+multi-turn chat and prefix reuse together, and `/api/chat/reset` plus a New
+button clear both at once — dropping the transcript alone would leave the model
+still answering in the old context.
+
+Measured on the dashboard, Qwen3, three turns of a real conversation:
+
+| turn | prompt tokens | reused | time to first token |
+| ---: | ---: | ---: | ---: |
+| 1 | 25 | 0 | 6.1 s |
+| 3 | 173 | 85 | 9.2 s |
+
+Reuse extends to the point where the re-encoded transcript diverges from what
+was generated — 85 of 173 tokens here. It is bounded rather than total because
+an assistant turn is stored as its answer channel and re-encoded with template
+markup, so history is not reproduced token for token. The saving is real and
+partial, and both numbers are reported to the client so this stays visible
+rather than becoming folklore.
+
 The subtlety worth recording: the reusable prefix cannot be taken as "the
 cached length". An assistant turn is re-encoded from its answer channel alone
 and wrapped in template markup that was never generated, so the tokens in the

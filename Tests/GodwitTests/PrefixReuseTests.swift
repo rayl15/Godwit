@@ -10,7 +10,9 @@ import Testing
 /// only the new suffix makes time-to-first-token flat instead of growing.
 ///
 /// The risk is that reuse fails silently — a stale prefix still produces
-/// fluent text — so the properties it depends on are pinned here.
+/// fluent text — so the properties it depends on are pinned here. These call
+/// `ChatSession` directly, which is the same code the CLI and the dashboard
+/// both run.
 @Suite("Prefix reuse", .enabled(if: MTLCreateSystemDefaultDevice() != nil))
 struct PrefixReuseTests {
     private func cache(_ maxContext: Int = 64) throws -> KVCache {
@@ -18,15 +20,8 @@ struct PrefixReuseTests {
                     maxContext: maxContext, layerCount: 2)
     }
 
-    /// The prefix length the chat loop computes, extracted so it can be tested
-    /// without a model. Capped one short of the prompt: logits come from the
-    /// last position, and prefilling nothing produces none.
     private func reusable(cached: [Int], ids: [Int]) -> Int {
-        var reused = 0
-        while reused < min(cached.count, ids.count - 1), cached[reused] == ids[reused] {
-            reused += 1
-        }
-        return reused
+        ChatSession.reusablePrefix(cached: cached, ids: ids)
     }
 
     @Test("Truncation rewinds to a prefix and accepts the boundaries")
