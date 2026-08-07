@@ -8,17 +8,10 @@ import Metal
 /// design exists: it is ~25M quantised weights that are needed for one token and
 /// then likely not again for a while.
 public struct ExpertRunner {
-    /// Which activation kernel this model's experts use.
-    ///
-    /// GPT-OSS's clamped GLU and plain SwiGLU differ by a clamp, a `+1` shift
-    /// and a sigmoid steepness. Every one of those runs silently if wrong, so
-    /// the choice is driven by the spec rather than by a default.
+    /// Which activation kernel this model's experts use. The mapping lives on
+    /// `FeedForwardActivation` so a new case cannot be added without one.
     private var activationFunction: String {
-        switch reader.manifest.spec.activation {
-        case .gptOssClampedGLU: return "gptoss_expert_activation"
-        case .silu: return "expert_activation_swiglu"
-        case .geluTanh: return "expert_activation_swiglu"
-        }
+        reader.manifest.spec.activation.kernel
     }
 
     public let context: MetalContext
